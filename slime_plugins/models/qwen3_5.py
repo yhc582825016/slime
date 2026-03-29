@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import logging
 
 import torch
 import torch.nn as nn
@@ -38,12 +39,50 @@ except ImportError:
 
 from .hf_attention import HuggingfaceAttention
 
+logger = logging.getLogger(__name__)
+
 
 def _get_text_config(hf_config):
     """Extract text config from a VLM config if needed."""
     if hasattr(hf_config, "text_config"):
         return hf_config.text_config
     return hf_config
+
+
+def _resolve_layer_types(text_config):
+    """Resolve per-layer attention types with backward-compatible fallbacks.
+
+    Preferred source is `text_config.layer_types`.
+    Some transformers/qwen3.5 config variants do not expose this attribute but
+    provide `full_attention_interval` and `num_hidden_layers`, from which we can
+    reconstruct the expected linear/full pattern.
+    """
+    layer_types = getattr(text_config, "layer_types", None)
+    if layer_types:
+        return list(layer_types)
+
+    num_layers = int(getattr(text_config, "num_hidden_layers"))
+    full_interval = int(getattr(text_config, "full_attention_interval", 0) or 0)
+
+    if full_interval <= 0:
+        logger.warning(
+            "Qwen3.5 text_config has no layer_types and no valid full_attention_interval; "
+            "fallback to all full_attention layers."
+        )
+        return ["full_attention"] * num_layers
+
+    reconstructed = []
+    for i in range(num_layers):
+        if (i + 1) % full_interval == 0:
+            reconstructed.append("full_attention")
+        else:
+            reconstructed.append("linear_attention")
+    logger.info(
+        "Reconstructed qwen3.5 layer_types from full_attention_interval=%s, num_hidden_layers=%s",
+        full_interval,
+        num_layers,
+    )
+    return reconstructed
 
 
 # Adapted from Qwen3NextGatedDeltaNet but with separate in_proj_qkv and in_proj_z
@@ -225,9 +264,10 @@ def get_qwen3_5_spec(args, config, vp_stage):
 
     hf_config = _load_hf_config(args.hf_checkpoint)
     text_config = _get_text_config(hf_config)
+    layer_types = _resolve_layer_types(text_config)
 
     for layer_id in range(num_layers_to_build):
-        if text_config.layer_types[layer_id + offset] == "linear_attention":
+        if layer_types[layer_id + offset] == "linear_attention":
             layer_specs = copy.deepcopy(transformer_layer_spec.layer_specs[layer_id])
             layer_specs.submodules.self_attention = ModuleSpec(
                 module=Attention,
