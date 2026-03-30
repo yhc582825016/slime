@@ -301,17 +301,38 @@ def _target_candidates(target: str) -> list[str]:
 
 
 def _load_targets(label: Any) -> list[str]:
+    def _expand_targets(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        if isinstance(value, (list, tuple, set)):
+            expanded: list[str] = []
+            for item in value:
+                expanded.extend(_expand_targets(item))
+            return expanded
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            # Some datasets serialize answers as strings like '["John Doe"]'.
+            parsed: Any | None = None
+            for parser in (json.loads, ast.literal_eval):
+                try:
+                    parsed = parser(raw)
+                    break
+                except Exception:
+                    continue
+            if parsed is not None and not isinstance(parsed, str):
+                return _expand_targets(parsed)
+            return [raw]
+        return [str(value)]
+
     if isinstance(label, dict):
         ground_truth = label.get("ground_truth")
     else:
         ground_truth = label
-    if ground_truth is None:
-        return []
-    if hasattr(ground_truth, "tolist"):
-        ground_truth = ground_truth.tolist()
-    if isinstance(ground_truth, (list, tuple)):
-        return [str(item) for item in ground_truth if item is not None]
-    return [str(ground_truth)]
+    return _expand_targets(ground_truth)
 
 
 def _prompt_to_text(prompt: Any) -> str:
@@ -358,6 +379,7 @@ async def custom_rm(args, sample: Sample, **kwargs) -> float:
     prediction = boxed_prediction if boxed_prediction is not None else _fallback_answer(cleaned_response)
     normalized_prediction = _safe_normalize_final_answer(prediction)
     pred_value = _canonicalize(normalized_prediction)
+    raw_pred_value = _canonicalize(prediction)
     targets = _load_targets(sample.label)
     reward = 0.2 if boxed_prediction is not None else 0.0
     matched = False
@@ -365,7 +387,11 @@ async def custom_rm(args, sample: Sample, **kwargs) -> float:
         for candidate in _target_candidates(target):
             normalized_candidate = _safe_normalize_final_answer(candidate)
             if (
-                pred_value == _canonicalize(normalized_candidate)
+                _relaxed_match(prediction, candidate)
+                or raw_pred_value == _canonicalize(candidate)
+                or pred_value == _canonicalize(candidate)
+                or _math_equivalent_match(prediction, candidate)
+                or pred_value == _canonicalize(normalized_candidate)
                 or _relaxed_match(normalized_prediction, normalized_candidate)
                 or _math_equivalent_match(normalized_prediction, normalized_candidate)
             ):
