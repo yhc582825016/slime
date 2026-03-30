@@ -1,0 +1,2 @@
+max_turns: 32
+rollout_interaction_env_path: examples.recall_agent.env_recall_agent

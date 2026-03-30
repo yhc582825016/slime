@@ -58,7 +58,7 @@ EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-1024}"
 # -------------------------------
 # Optional logging config (W&B)
 # -------------------------------
-USE_WANDB="${USE_WANDB:-0}"
+USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime}"
 WANDB_GROUP="${WANDB_GROUP:-qwen3.5-4B}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-qwen3.5-4B-swe-agentic}"
