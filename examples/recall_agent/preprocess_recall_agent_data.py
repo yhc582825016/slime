@@ -100,17 +100,47 @@ def _convert_row(row: dict[str, Any], row_idx: int) -> dict[str, Any]:
     }
 
 
-def convert_file(input_path: Path, output_path: Path, limit: int | None = None) -> None:
+def _validate_env_code(env_code: str) -> tuple[bool, str | None]:
+    if not env_code.strip():
+        return True, None
+    runtime: dict[str, Any] = {}
+    try:
+        exec(env_code, runtime, runtime)
+        return True, None
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def convert_file(
+    input_path: Path, output_path: Path, limit: int | None = None, drop_invalid_env: bool = True
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     dataframe = pd.read_parquet(input_path)
     if limit is not None:
         dataframe = dataframe.iloc[:limit]
 
+    written = 0
+    skipped_invalid = 0
     with output_path.open("w", encoding="utf-8") as fout:
         for row_idx, row in enumerate(dataframe.to_dict("records")):
-            fout.write(_json_dumps(_convert_row(row, row_idx)) + "\n")
+            converted = _convert_row(row, row_idx)
+            env_code = str(converted.get("metadata", {}).get("env") or "")
+            is_valid, err = _validate_env_code(env_code)
+            if drop_invalid_env and not is_valid:
+                skipped_invalid += 1
+                if skipped_invalid <= 5:
+                    print(
+                        f"[warn] skip invalid env sample row={row_idx} "
+                        f"question={converted.get('metadata', {}).get('question', '')!r} err={err}"
+                    )
+                continue
+            fout.write(_json_dumps(converted) + "\n")
+            written += 1
 
-    print(f"converted {len(dataframe)} rows from {input_path} -> {output_path}")
+    print(
+        f"converted {written}/{len(dataframe)} rows from {input_path} -> {output_path} "
+        f"(skipped_invalid_env={skipped_invalid})"
+    )
 
 
 def main() -> None:
@@ -119,11 +149,17 @@ def main() -> None:
     parser.add_argument("--test-input", required=True, help="Path to the raw evaluation parquet file.")
     parser.add_argument("--output-dir", required=True, help="Directory for the converted train/test jsonl files.")
     parser.add_argument("--limit", type=int, default=None, help="Optional limit for quick debugging.")
+    parser.add_argument(
+        "--keep-invalid-env",
+        action="store_true",
+        help="Keep samples whose env code fails to execute during preprocessing.",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
-    convert_file(Path(args.train_input), output_dir / "train.jsonl", limit=args.limit)
-    convert_file(Path(args.test_input), output_dir / "test.jsonl", limit=args.limit)
+    drop_invalid_env = not args.keep_invalid_env
+    convert_file(Path(args.train_input), output_dir / "train.jsonl", limit=args.limit, drop_invalid_env=drop_invalid_env)
+    convert_file(Path(args.test_input), output_dir / "test.jsonl", limit=args.limit, drop_invalid_env=drop_invalid_env)
 
 
 if __name__ == "__main__":

@@ -265,15 +265,32 @@ def _update_multimodal_state(
     return current_image_data
 
 
-def _should_stop_on_finish(sample: Sample, finish_type: str) -> bool:
+def _contains_tool_call_markup(text: str) -> bool:
+    text = text or ""
+    return "<tool_call>" in text and "</tool_call>" in text
+
+
+def _mark_stop_reason(sample: Sample, reason: str, **details: Any) -> None:
+    if not isinstance(sample.metadata, dict):
+        sample.metadata = {}
+    sample.metadata["stop_reason"] = reason
+    for key, value in details.items():
+        sample.metadata[f"stop_{key}"] = value
+
+
+def _should_stop_on_finish(sample: Sample, finish_type: str, response_text: str) -> str | None:
     match finish_type:
         case "length":
+            # If the model already emitted a complete tool_call block, give the env a chance
+            # to execute it before stopping on length.
+            if _contains_tool_call_markup(response_text):
+                return None
             sample.status = Sample.Status.TRUNCATED
-            return True
+            return "finish_reason_length_without_complete_tool_call"
         case "abort":
             sample.status = Sample.Status.ABORTED
-            return True
-    return False
+            return "finish_reason_abort"
+    return None
 
 
 def _update_budget(budget, consumed: int):
@@ -300,9 +317,30 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
         sample, state, args, sampling_params
     )
     try:
-        env.reset()
+        _, reset_info = env.reset()
+        if isinstance(reset_info, dict) and reset_info.get("init_error"):
+            sample.status = Sample.Status.ABORTED
+            _mark_stop_reason(
+                sample,
+                "env_init_error",
+                turn=0,
+                finish_type=None,
+                budget=budget,
+                has_complete_tool_call=False,
+                status=str(sample.status),
+            )
+            return _finalize_sample(sample, state.tokenizer, response_tokens, multimodal_train_inputs_buffer)
         if budget is not None and budget <= 0:
             sample.status = Sample.Status.TRUNCATED
+            _mark_stop_reason(
+                sample,
+                "budget_exhausted_before_generation",
+                turn=0,
+                finish_type=None,
+                budget=budget,
+                has_complete_tool_call=False,
+                status=str(sample.status),
+            )
             return sample
 
         cur_sampling_params = sampling_params
@@ -315,11 +353,31 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
             )
             _append_to_sample(sample, response_tokens, new_response_tokens, new_response_log_probs, loss_mask_val=1)
             budget = _update_budget(budget, len(new_response_tokens))
+            has_complete_tool_call = _contains_tool_call_markup(response_text)
 
-            if _should_stop_on_finish(sample, finish_type):
+            stop_reason = _should_stop_on_finish(sample, finish_type, response_text)
+            if stop_reason is not None:
+                _mark_stop_reason(
+                    sample,
+                    stop_reason,
+                    turn=turn_idx + 1,
+                    finish_type=finish_type,
+                    budget=budget,
+                    has_complete_tool_call=has_complete_tool_call,
+                    status=str(sample.status),
+                )
                 break
-            if budget is not None and budget <= 0:
+            if budget is not None and budget <= 0 and not has_complete_tool_call:
                 sample.status = Sample.Status.TRUNCATED
+                _mark_stop_reason(
+                    sample,
+                    "budget_exhausted_without_complete_tool_call",
+                    turn=turn_idx + 1,
+                    finish_type=finish_type,
+                    budget=budget,
+                    has_complete_tool_call=has_complete_tool_call,
+                    status=str(sample.status),
+                )
                 break
 
             obs_prompt_ids, obs_image_data, obs_multimodal_inputs, obs_multimodal_train_inputs, done = (
@@ -327,6 +385,15 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
             )
             if done:
                 sample.status = Sample.Status.COMPLETED
+                _mark_stop_reason(
+                    sample,
+                    "env_done",
+                    turn=turn_idx + 1,
+                    finish_type=finish_type,
+                    budget=budget,
+                    has_complete_tool_call=has_complete_tool_call,
+                    status=str(sample.status),
+                )
                 break
 
             obs_log_probs = [0.0] * len(obs_prompt_ids)
@@ -344,11 +411,39 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
 
             if budget is not None and budget <= 0:
                 sample.status = Sample.Status.TRUNCATED
+                _mark_stop_reason(
+                    sample,
+                    "budget_exhausted_after_observation",
+                    turn=turn_idx + 1,
+                    finish_type=finish_type,
+                    budget=budget,
+                    has_complete_tool_call=has_complete_tool_call,
+                    status=str(sample.status),
+                )
                 break
             if turn_idx + 1 >= config["max_turns"]:
                 sample.status = Sample.Status.COMPLETED
+                _mark_stop_reason(
+                    sample,
+                    "max_turns_reached",
+                    turn=turn_idx + 1,
+                    finish_type=finish_type,
+                    budget=budget,
+                    has_complete_tool_call=has_complete_tool_call,
+                    status=str(sample.status),
+                )
                 break
 
+        if isinstance(sample.metadata, dict) and "stop_reason" not in sample.metadata:
+            _mark_stop_reason(
+                sample,
+                "loop_exited_without_explicit_reason",
+                turn=config["max_turns"],
+                finish_type=None,
+                budget=budget,
+                has_complete_tool_call=False,
+                status=str(sample.status) if sample.status is not None else None,
+            )
         return _finalize_sample(sample, state.tokenizer, response_tokens, multimodal_train_inputs_buffer)
     finally:
         try:

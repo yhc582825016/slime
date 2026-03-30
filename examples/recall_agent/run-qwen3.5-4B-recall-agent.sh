@@ -8,11 +8,11 @@ cd "${ROOT_DIR}"
 
 export PYTHONUNBUFFERED=1
 
-HF_CKPT="${HF_CKPT:-/dev/shm/Qwen3.5-4B-Thinking}"
+HF_CKPT="${HF_CKPT:-/dev/shm/Qwen3.5-4B}"
 MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
 
-RAW_TRAIN="${RAW_TRAIN:-/mnt/code/yehangcheng/github/verl/examples/sglang_multiturn/syntool_recall_filter/train_filtered.parquet}"
-RAW_TEST="${RAW_TEST:-/mnt/code/yehangcheng/github/verl/examples/sglang_multiturn/syntool_recall_filter/test_filtered.parquet}"
+RAW_TRAIN="${RAW_TRAIN:-/dev/shm/ye/slime/examples/recall_agent/train_filtered.parquet}"
+RAW_TEST="${RAW_TEST:-/dev/shm/ye/slime/examples/recall_agent/test_filtered.parquet}"
 PROMPT_DATA_DIR="${PROMPT_DATA_DIR:-${SCRIPT_DIR}/data}"
 PROMPT_TRAIN="${PROMPT_TRAIN:-${PROMPT_DATA_DIR}/train.jsonl}"
 PROMPT_TEST="${PROMPT_TEST:-${PROMPT_DATA_DIR}/test.jsonl}"
@@ -20,6 +20,7 @@ PROMPT_TEST="${PROMPT_TEST:-${PROMPT_DATA_DIR}/test.jsonl}"
 REF_LOAD="${REF_LOAD:-/dev/shm/Qwen3.5-4B-Thinking_torch_dist}"
 LOAD_PATH="${LOAD_PATH:-${REF_LOAD}}"
 SAVE_PATH="${SAVE_PATH:-/dev/shm/Qwen3.5-4B-Thinking_recall_agent}"
+RECALL_AGENT_JOB_LOG="${RECALL_AGENT_JOB_LOG:-/dev/shm/ye/logs/recall_agent_$(date +%Y%m%d_%H%M%S).log}"
 
 NUM_GPUS="${NUM_GPUS:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}"
 if [[ -z "${NUM_GPUS}" || "${NUM_GPUS}" -le 0 ]]; then
@@ -30,21 +31,22 @@ TP_SIZE="${TP_SIZE:-4}"
 ROLLOUT_NUM_GPUS_PER_ENGINE="${ROLLOUT_NUM_GPUS_PER_ENGINE:-1}"
 
 MAX_TOKENS_PER_GPU="${MAX_TOKENS_PER_GPU:-6144}"
-ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-4096}"
+ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-24000}"
 NUM_ROLLOUT="${NUM_ROLLOUT:-4000}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-200}"
+OVER_SAMPLING_BATCH_SIZE="${OVER_SAMPLING_BATCH_SIZE:-16}"
 
 USE_EVAL="${USE_EVAL:-1}"
 EVAL_INTERVAL="${EVAL_INTERVAL:-50}"
 EVAL_DATA_NAME="${EVAL_DATA_NAME:-recall_agent_eval}"
 N_SAMPLES_PER_EVAL_PROMPT="${N_SAMPLES_PER_EVAL_PROMPT:-1}"
-EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-2048}"
+EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-24000}"
 
-USE_WANDB="${USE_WANDB:-0}"
-WANDB_PROJECT="${WANDB_PROJECT:-slime-dev}"
+USE_WANDB="${USE_WANDB:-1}"
+WANDB_PROJECT="${WANDB_PROJECT:-slime}"
 WANDB_GROUP="${WANDB_GROUP:-recall_agent_qwen3.5_4b}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-qwen3.5-4B-recall-agent}"
 WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-}}"
@@ -70,7 +72,7 @@ if [[ ! -d "${MEGATRON_PATH}" ]]; then
   exit 1
 fi
 
-mkdir -p "${PROMPT_DATA_DIR}" "${SAVE_PATH}"
+mkdir -p "${PROMPT_DATA_DIR}" "${SAVE_PATH}" "$(dirname -- "${RECALL_AGENT_JOB_LOG}")"
 
 echo "[step] converting recall-agent parquet to slime jsonl..."
 python "${SCRIPT_DIR}/preprocess_recall_agent_data.py" \
@@ -108,6 +110,8 @@ ROLLOUT_ARGS=(
   --num-rollout "${NUM_ROLLOUT}"
   --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT}"
+  --over-sampling-batch-size "${OVER_SAMPLING_BATCH_SIZE}"
+  --dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
   --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN}"
   --rollout-temperature 1.0
   --global-batch-size "${GLOBAL_BATCH_SIZE}"
@@ -214,8 +218,8 @@ RUNTIME_ENV_JSON="{
   }
 }"
 
-echo "[step] submitting ray job..."
-ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
+echo "[step] submitting ray job (nohup, log: ${RECALL_AGENT_JOB_LOG})..."
+nohup ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
   --runtime-env-json="${RUNTIME_ENV_JSON}" \
   -- python3 train.py \
   --actor-num-nodes 1 \
@@ -231,4 +235,6 @@ ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
   "${PERF_ARGS[@]}" \
   "${SGLANG_ARGS[@]}" \
   "${MISC_ARGS[@]}" \
-  "${CUSTOM_ARGS[@]}"
+  "${CUSTOM_ARGS[@]}" \
+  >> "${RECALL_AGENT_JOB_LOG}" 2>&1 &
+echo "[info] ray job submit pid: $!  (output: ${RECALL_AGENT_JOB_LOG})"

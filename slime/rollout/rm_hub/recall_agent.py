@@ -6,13 +6,81 @@ import os
 import re
 from typing import Any
 
+from slime.rollout.rm_hub.math_utils import extract_answer, grade_answer_mathd, grade_answer_sympy
 from slime.utils.types import Sample
 
-BOX_PREFIXES = ("\\boxed{", "\\box{", "boxed{", "box{")
+BOX_PREFIXES = ("\\boxed", "\\fbox", "\\box", "boxed{", "box{")
+SUBSTITUTIONS = [
+    ("an ", ""),
+    ("a ", ""),
+    (".$", "$"),
+    ("\\$", ""),
+    (r"\ ", ""),
+    (" ", ""),
+    ("mbox", "text"),
+    (",\\text{and}", ","),
+    ("\\text{and}", ","),
+    ("\\text{m}", "\\text{}"),
+]
+REMOVED_EXPRESSIONS = [
+    "square",
+    "ways",
+    "integers",
+    "dollars",
+    "mph",
+    "inches",
+    "hours",
+    "km",
+    "units",
+    "\\ldots",
+    "sue",
+    "points",
+    "feet",
+    "minutes",
+    "digits",
+    "cents",
+    "degrees",
+    "cm",
+    "gm",
+    "pounds",
+    "meters",
+    "meals",
+    "edges",
+    "students",
+    "childrentickets",
+    "multiples",
+    "\\text{s}",
+    "\\text{.}",
+    "\\text{\ns}",
+    "\\text{}^2",
+    "\\text{}^3",
+    "\\text{\n}",
+    "\\text{}",
+    r"\mathrm{th}",
+    r"^\circ",
+    r"^{\circ}",
+    r"\;",
+    r",\!",
+    "{,}",
+    '"',
+    "\\dots",
+    "<|im_end|>",
+    "<|endoftext|>",
+]
 DEBUG_REWARD = os.getenv("RECALL_AGENT_DEBUG_REWARD", "1") == "1"
 DEBUG_REWARD_EVERY = max(1, int(os.getenv("RECALL_AGENT_DEBUG_REWARD_EVERY", "1")))
 DEBUG_RESPONSE_MAX_CHARS = max(200, int(os.getenv("RECALL_AGENT_DEBUG_RESPONSE_MAX_CHARS", "4000")))
 _DEBUG_COUNTER = 0
+
+
+def _strip_special_tokens(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"<\|im_start\|>.*?(?=\n)", " ", text)
+    text = re.sub(r"<\|im_end\|>", " ", text)
+    text = re.sub(r"<\|endoftext\|>", " ", text)
+    text = re.sub(r"</s>", " ", text)
+    return text
 
 
 def _post_think_text(text: str) -> str:
@@ -24,7 +92,7 @@ def _post_think_text(text: str) -> str:
 def _strip_tool_markup(text: str) -> str:
     text = re.sub(r"<tool_call>.*?</tool_call>", " ", text, flags=re.DOTALL)
     text = re.sub(r"<tool_response>.*?</tool_response>", " ", text, flags=re.DOTALL)
-    return re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def _extract_balanced_content(text: str, open_brace_idx: int) -> str | None:
@@ -40,30 +108,65 @@ def _extract_balanced_content(text: str, open_brace_idx: int) -> str | None:
     return None
 
 
-def _extract_last_boxed(text: str) -> str | None:
-    last_match: tuple[int, str] | None = None
+def _last_boxed_only_string(text: str) -> str | None:
+    # Align behavior with math reward utils: take only the last complete boxed span.
+    best_idx = -1
     for prefix in BOX_PREFIXES:
-        start = 0
-        while True:
-            idx = text.find(prefix, start)
-            if idx < 0:
+        idx = text.rfind(prefix)
+        if idx > best_idx:
+            best_idx = idx
+    if best_idx < 0:
+        return None
+
+    right_brace_idx = None
+    num_left_braces_open = 0
+    i = best_idx
+    while i < len(text):
+        if text[i] == "{":
+            num_left_braces_open += 1
+        elif text[i] == "}":
+            num_left_braces_open -= 1
+            if num_left_braces_open == 0:
+                right_brace_idx = i
                 break
-            content = _extract_balanced_content(text, idx + len(prefix) - 1)
-            if content is not None:
-                last_match = (idx, content)
-            start = idx + 1
-    return last_match[1].strip() if last_match is not None else None
+        i += 1
+
+    if right_brace_idx is None:
+        return None
+    return text[best_idx : right_brace_idx + 1]
+
+
+def _remove_boxed(boxed: str | None) -> str | None:
+    if boxed is None:
+        return None
+    open_brace_idx = boxed.find("{")
+    if open_brace_idx < 0:
+        return None
+    content = _extract_balanced_content(boxed, open_brace_idx)
+    if content is None:
+        return None
+    return content.strip()
+
+
+def _extract_last_boxed(text: str) -> str | None:
+    return _remove_boxed(_last_boxed_only_string(text))
 
 
 def _fallback_answer(text: str) -> str:
-    stripped = _strip_tool_markup(text)
+    stripped = _strip_tool_markup(_strip_special_tokens(text))
     if not stripped:
         return ""
     for line in reversed(stripped.splitlines()):
         candidate = line.strip()
+        if not candidate:
+            continue
+        if candidate.startswith("<|") and candidate.endswith("|>"):
+            continue
+        if candidate in {"assistant", "user", "system"}:
+            continue
         if candidate:
             return candidate
-    return stripped
+    return " ".join(stripped.strip().split())
 
 
 def _normalize_string(value: str) -> str:
@@ -94,12 +197,107 @@ def _canonicalize(value: Any):
     return _normalize_string(str(value))
 
 
+def _extract_single_text_value(value: Any) -> str | None:
+    """Extract a single text answer from plain/scalar or singleton containers."""
+    if isinstance(value, str):
+        raw = value.strip()
+        try:
+            parsed = ast.literal_eval(raw)
+        except Exception:
+            return raw
+        return _extract_single_text_value(parsed)
+    if isinstance(value, (list, tuple)):
+        if len(value) != 1:
+            return None
+        return _extract_single_text_value(value[0])
+    if isinstance(value, (dict, set)):
+        return None
+    return str(value)
+
+
+def _normalize_relaxed_text(value: str) -> str:
+    # Keep semantic order, but treat common separators as equivalent.
+    text = _normalize_string(value)
+    text = re.sub(r"\s*(?:,|;|\|)\s*", " | ", text)
+    text = re.sub(r"\s+-\s+", " | ", text)
+    return " ".join(text.split())
+
+
+def _normalize_final_answer(value: str) -> str:
+    final_answer = str(value)
+    final_answer = final_answer.split("=")[-1]
+
+    for before, after in SUBSTITUTIONS:
+        final_answer = final_answer.replace(before, after)
+    for expr in REMOVED_EXPRESSIONS:
+        final_answer = final_answer.replace(expr, "")
+
+    final_answer = re.sub(r"(.*?)(\$)(.*?)(\$)(.*)", "$\\3$", final_answer)
+    final_answer = re.sub(r"(\\text\{)(.*?)(\})", "\\2", final_answer)
+    final_answer = re.sub(r"(\\textbf\{)(.*?)(\})", "\\2", final_answer)
+    final_answer = re.sub(r"(\\overline\{)(.*?)(\})", "\\2", final_answer)
+    final_answer = re.sub(r"(\\boxed\{)(.*)(\})", "\\2", final_answer)
+
+    final_answer = re.sub(r"(frac)([^{])(.)", "frac{\\2}{\\3}", final_answer)
+    final_answer = re.sub(r"(sqrt)([^{])", "sqrt{\\2}", final_answer)
+    final_answer = final_answer.replace("$", "")
+
+    if final_answer.replace(",", "").isdigit():
+        final_answer = final_answer.replace(",", "")
+    return final_answer.strip()
+
+
+def _safe_normalize_final_answer(value: str) -> str:
+    try:
+        return _normalize_final_answer(value)
+    except Exception:
+        return str(value).strip()
+
+
+def _relaxed_match(prediction: str, target: str) -> bool:
+    pred_text = _extract_single_text_value(prediction)
+    target_text = _extract_single_text_value(target)
+    if pred_text is None or target_text is None:
+        return False
+    return _normalize_relaxed_text(pred_text) == _normalize_relaxed_text(target_text)
+
+
+def _math_equivalent_match(prediction: str, target: str) -> bool:
+    given_answer = (prediction or "").strip()
+    if not given_answer:
+        return False
+
+    ground_truth = str(target) if target is not None else ""
+    if not ground_truth:
+        return False
+
+    # Keep behavior aligned with math utils: compare on boxed payload when present.
+    if "\\boxed" in ground_truth:
+        extracted = extract_answer(ground_truth)
+        if extracted:
+            ground_truth = extracted
+
+    try:
+        return grade_answer_mathd(given_answer, ground_truth) or grade_answer_sympy(given_answer, ground_truth)
+    except Exception:
+        return False
+
+
 def _extract_prediction(response: str) -> str:
-    cleaned = _post_think_text(response or "")
+    cleaned = _strip_special_tokens(_post_think_text(response or ""))
     boxed = _extract_last_boxed(cleaned)
     if boxed is not None:
         return boxed
     return _fallback_answer(cleaned)
+
+
+def _target_candidates(target: str) -> list[str]:
+    cleaned = _strip_special_tokens(_post_think_text(str(target)))
+    candidates: list[str] = [str(target)]
+    boxed = _extract_last_boxed(cleaned)
+    if boxed is not None and boxed not in candidates:
+        candidates.append(boxed)
+    return candidates
 
 
 def _load_targets(label: Any) -> list[str]:
@@ -155,14 +353,28 @@ async def custom_rm(args, sample: Sample, **kwargs) -> float:
         raise TypeError("sample must be an instance of slime.utils.types.Sample")
 
     metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
-    prediction = _extract_prediction(sample.response or "")
-    pred_value = _canonicalize(prediction)
+    cleaned_response = _strip_special_tokens(_post_think_text(sample.response or ""))
+    boxed_prediction = _extract_last_boxed(cleaned_response)
+    prediction = boxed_prediction if boxed_prediction is not None else _fallback_answer(cleaned_response)
+    normalized_prediction = _safe_normalize_final_answer(prediction)
+    pred_value = _canonicalize(normalized_prediction)
     targets = _load_targets(sample.label)
-    reward = 0.0
+    reward = 0.2 if boxed_prediction is not None else 0.0
+    matched = False
     for target in targets:
-        if pred_value == _canonicalize(target):
-            reward = 1.0
+        for candidate in _target_candidates(target):
+            normalized_candidate = _safe_normalize_final_answer(candidate)
+            if (
+                pred_value == _canonicalize(normalized_candidate)
+                or _relaxed_match(normalized_prediction, normalized_candidate)
+                or _math_equivalent_match(normalized_prediction, normalized_candidate)
+            ):
+                matched = True
+                break
+        if matched:
             break
+    if matched:
+        reward += 0.8
 
     if DEBUG_REWARD:
         _DEBUG_COUNTER += 1
@@ -171,9 +383,16 @@ async def custom_rm(args, sample: Sample, **kwargs) -> float:
                 "idx": _DEBUG_COUNTER,
                 "sample_index": metadata.get("index"),
                 "question": metadata.get("question"),
+                "stop_reason": metadata.get("stop_reason"),
+                "stop_turn": metadata.get("stop_turn"),
+                "stop_finish_type": metadata.get("stop_finish_type"),
+                "stop_budget": metadata.get("stop_budget"),
+                "stop_has_complete_tool_call": metadata.get("stop_has_complete_tool_call"),
+                "stop_status": metadata.get("stop_status"),
                 "input": _shorten_text(_prompt_to_text(sample.prompt), DEBUG_RESPONSE_MAX_CHARS),
                 "output": _shorten_text(sample.response or "", DEBUG_RESPONSE_MAX_CHARS),
                 "prediction": prediction,
+                "normalized_prediction": normalized_prediction,
                 "ground_truth": targets,
                 "reward": reward,
             }

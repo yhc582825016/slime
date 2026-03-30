@@ -22,6 +22,7 @@ TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL
 FUNCTION_BLOCK_RE = re.compile(r"(<function\s*=\s*.*?</function>)", re.DOTALL)
 FUNCTION_TAG_RE = re.compile(r"<function\s*=\s*([a-zA-Z0-9_\-\.]+)\s*>", re.DOTALL)
 PARAM_TAG_RE = re.compile(r"<parameter\s*=\s*([a-zA-Z0-9_\-\.]+)\s*>(.*?)</parameter>", re.DOTALL)
+EOS_MARKERS = ("<|im_end|>", "<|endoftext|>", "</s>")
 
 
 def _json_loads(value: str) -> dict[str, Any]:
@@ -82,6 +83,40 @@ def _extract_from_function_parameter_markup(text: str) -> dict[str, Any] | None:
     return {"name": fn_name, "arguments": arguments}
 
 
+def _normalize_tool_payload(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    name = payload.get("name")
+    arguments = payload.get("arguments")
+
+    # Some models emit OpenAI-style function wrapper:
+    # {"function": {"name": "...", "arguments": {...}}}
+    fn_payload = payload.get("function")
+    if (not name) and isinstance(fn_payload, dict):
+        name = fn_payload.get("name")
+        arguments = fn_payload.get("arguments")
+
+    if not name:
+        return None
+    if isinstance(arguments, str):
+        arguments = _safe_json_loads(arguments)
+    if not isinstance(arguments, dict):
+        arguments = {}
+    return {"name": str(name).strip(), "arguments": arguments}
+
+
+def _extract_json_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for idx, ch in enumerate(text):
+        if ch != "{":
+            continue
+        candidate = _extract_balanced_json(text, idx)
+        if candidate:
+            candidates.append(candidate.strip())
+    return candidates
+
+
 class RecallAgentEnv(BaseInteractionEnv):
     def __init__(self, *, env_code: str, tool_schemas: list[dict[str, Any]], max_turns: int | None = None):
         self.env_code = env_code
@@ -89,6 +124,7 @@ class RecallAgentEnv(BaseInteractionEnv):
         self.max_turns = max_turns
         self.turn = 0
         self.runtime_env: dict[str, Any] = {}
+        self.init_error: str | None = None
         self.supported_tools = {
             tool.get("function", {}).get("name")
             for tool in tool_schemas
@@ -98,42 +134,70 @@ class RecallAgentEnv(BaseInteractionEnv):
     def reset(self):
         self.turn = 0
         self.runtime_env = {}
+        self.init_error = None
         if self.env_code.strip():
-            exec(self.env_code, self.runtime_env, self.runtime_env)
-        return {}, {"tool_count": len(self.supported_tools)}
+            try:
+                exec(self.env_code, self.runtime_env, self.runtime_env)
+            except Exception as exc:
+                self.init_error = f"{type(exc).__name__}: {exc}"
+                logger.warning("Failed to initialize recall-agent env: %s", self.init_error)
+                logger.debug("Env init traceback:\n%s", traceback.format_exc())
+        return {}, {"tool_count": len(self.supported_tools), "init_error": self.init_error}
 
     def close(self):
         self.runtime_env.clear()
 
-    def _extract_tool_call(self, text: str) -> dict[str, Any] | None:
+    def _extract_tool_calls(self, text: str) -> list[dict[str, Any]]:
+        tool_calls: list[dict[str, Any]] = []
+        blocks = TOOL_CALL_BLOCK_RE.findall(text)
+        for block in blocks:
+            found_in_block = False
+            for raw_json in _extract_json_candidates(block):
+                try:
+                    payload = _json_loads(raw_json)
+                except Exception:
+                    continue
+                normalized = _normalize_tool_payload(payload)
+                if normalized is not None:
+                    tool_calls.append(normalized)
+                    found_in_block = True
+                    break
+            if found_in_block:
+                continue
+            payload = _extract_from_function_parameter_markup(block)
+            if payload is not None:
+                tool_calls.append(payload)
+
+        if tool_calls:
+            return tool_calls
+
         matches = TOOL_CALL_JSON_RE.findall(text)
-        for raw_json in reversed(matches):
+        for raw_json in matches:
             raw_json = (_extract_balanced_json(raw_json.strip(), 0) or raw_json).strip()
             try:
                 payload = _json_loads(raw_json)
             except Exception as exc:
                 logger.warning("Failed to decode tool call payload: %s", exc)
                 continue
-            if not isinstance(payload, dict):
-                continue
-            arguments = payload.get("arguments") or {}
-            if isinstance(arguments, str):
-                arguments = _safe_json_loads(arguments)
-            return {"name": payload.get("name"), "arguments": arguments}
-
-        blocks = TOOL_CALL_BLOCK_RE.findall(text)
-        for block in reversed(blocks):
-            payload = _extract_from_function_parameter_markup(block)
-            if payload is not None:
-                return payload
+            normalized = _normalize_tool_payload(payload)
+            if normalized is not None:
+                tool_calls.append(normalized)
 
         fn_blocks = FUNCTION_BLOCK_RE.findall(text)
-        for block in reversed(fn_blocks):
+        for block in fn_blocks:
             payload = _extract_from_function_parameter_markup(block)
             if payload is not None:
-                return payload
+                tool_calls.append(payload)
 
-        return None
+        return tool_calls
+
+    def _has_terminal_eos(self, text: str) -> bool:
+        text = text or ""
+        return any(marker in text for marker in EOS_MARKERS)
+
+    def _has_tool_call_markup(self, text: str) -> bool:
+        text = text or ""
+        return "<tool_call>" in text or "</tool_call>" in text
 
     def _serialize_result(self, value: Any) -> str:
         if isinstance(value, str):
@@ -172,30 +236,93 @@ class RecallAgentEnv(BaseInteractionEnv):
     def step(self, response_text: str):
         self.turn += 1
         done = self.max_turns is not None and self.turn >= self.max_turns
-        tool_call = self._extract_tool_call(response_text)
-        info: dict[str, Any] = {"tool_call": deepcopy(tool_call)}
-
-        if not tool_call:
-            info["tool_executed"] = False
-            return {"obs_str": "No tool call detected.", "role": "tool"}, True, info
-
-        tool_name = str(tool_call.get("name") or "").strip()
-        arguments = tool_call.get("arguments") or {}
-        if tool_name not in self.supported_tools:
-            info["tool_executed"] = False
+        if self.init_error:
+            info: dict[str, Any] = {"tool_executed": False, "init_error": self.init_error}
             obs = {
                 "obs_str": (
-                    f"<tool_response>Error: unsupported tool `{tool_name}`.</tool_response>\n"
+                    f"<tool_response>Error: environment initialization failed: {self.init_error}</tool_response>\n"
+                    "No tools are available for this sample because env init failed.\n"
                     f"{self._turn_hint()}"
                 ),
                 "role": "tool",
             }
             return obs, done, info
 
-        tool_result = self._execute_tool(tool_name, arguments)
-        info.update({"tool_executed": True, "tool_name": tool_name, "tool_result": tool_result})
+        tool_calls = self._extract_tool_calls(response_text)
+        info: dict[str, Any] = {
+            "tool_calls": deepcopy(tool_calls),
+            "tool_call": deepcopy(tool_calls[0]) if tool_calls else None,
+        }
+
+        if not tool_calls:
+            if self._has_tool_call_markup(response_text):
+                info["tool_executed"] = False
+                obs = {
+                    "obs_str": (
+                        "<tool_response>Error: malformed tool call payload.</tool_response>\n"
+                        "You emitted tool_call markup but no valid callable payload was parsed.\n"
+                        "Please output a valid JSON tool call payload.\n"
+                        f"{self._turn_hint()}"
+                    ),
+                    "role": "tool",
+                }
+                return obs, done, info
+            # End only when the model emits no tool call and reaches an EOS marker.
+            if self._has_terminal_eos(response_text):
+                info.update({"tool_executed": False, "final_answer_detected": True})
+                return {"obs_str": "Final answer detected via EOS marker.", "role": "tool"}, True, info
+            info["tool_executed"] = False
+            obs = {
+                "obs_str": (
+                    "<tool_response>Error: no valid tool call detected.</tool_response>\n"
+                    "Please output exactly one valid <tool_call>...</tool_call> block.\n"
+                    f"{self._turn_hint()}"
+                ),
+                "role": "tool",
+            }
+            return obs, done, info
+
+        response_chunks: list[str] = []
+        executed_calls: list[dict[str, Any]] = []
+        for idx, tool_call in enumerate(tool_calls, start=1):
+            tool_name = str(tool_call.get("name") or "").strip()
+            arguments = tool_call.get("arguments") or {}
+            if tool_name not in self.supported_tools:
+                tool_result = f"Error: unsupported tool `{tool_name}`."
+                executed_calls.append(
+                    {
+                        "index": idx,
+                        "tool_executed": False,
+                        "tool_name": tool_name,
+                        "arguments": arguments,
+                        "tool_result": tool_result,
+                    }
+                )
+                response_chunks.append(f"<tool_response>{tool_result}</tool_response>")
+                continue
+            tool_result = self._execute_tool(tool_name, arguments)
+            executed_calls.append(
+                {
+                    "index": idx,
+                    "tool_executed": True,
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                    "tool_result": tool_result,
+                }
+            )
+            response_chunks.append(f"<tool_response>{tool_result}</tool_response>")
+
+        any_success = any(item["tool_executed"] for item in executed_calls)
+        info.update(
+            {
+                "tool_executed": any_success,
+                "executed_tool_calls": executed_calls,
+                "tool_name": executed_calls[0]["tool_name"] if executed_calls else None,
+                "tool_result": executed_calls[0]["tool_result"] if executed_calls else None,
+            }
+        )
         obs = {
-            "obs_str": f"<tool_response>{tool_result}</tool_response>\n{self._turn_hint()}",
+            "obs_str": f"{''.join(response_chunks)}\n{self._turn_hint()}",
             "role": "tool",
         }
         return obs, done, info
