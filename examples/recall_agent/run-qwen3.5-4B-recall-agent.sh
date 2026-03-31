@@ -16,7 +16,8 @@ RAW_TEST="${RAW_TEST:-/dev/shm/ye/slime/examples/recall_agent/test_filtered.parq
 PROMPT_DATA_DIR="${PROMPT_DATA_DIR:-${SCRIPT_DIR}/data}"
 PROMPT_TRAIN="${PROMPT_TRAIN:-${PROMPT_DATA_DIR}/train.jsonl}"
 PROMPT_TEST="${PROMPT_TEST:-${PROMPT_DATA_DIR}/test.jsonl}"
-
+echo "PROMPT_TRAIN: ${PROMPT_TRAIN}"
+echo "PROMPT_TEST: ${PROMPT_TEST}"
 REF_LOAD="${REF_LOAD:-/dev/shm/Qwen3.5-4B-Thinking_torch_dist}"
 LOAD_PATH="${LOAD_PATH:-${REF_LOAD}}"
 SAVE_PATH="${SAVE_PATH:-/dev/shm/Qwen3.5-4B-Thinking_recall_agent}"
