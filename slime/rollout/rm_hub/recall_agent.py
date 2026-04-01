@@ -335,6 +335,23 @@ def _load_targets(label: Any) -> list[str]:
     return _expand_targets(ground_truth)
 
 
+def _augment_multi_part_targets(targets: list[str]) -> list[str]:
+    """Labels often store an ordered answer as list[str]; models box it as one comma-separated line.
+
+    Without this, matching compares the full prediction against each part only and never succeeds.
+    """
+    if len(targets) <= 1:
+        return list(targets)
+    out = list(targets)
+    seen = set(targets)
+    for sep in (", ", "; ", " | ", ","):
+        merged = sep.join(targets)
+        if merged not in seen:
+            seen.add(merged)
+            out.append(merged)
+    return out
+
+
 def _prompt_to_text(prompt: Any) -> str:
     if isinstance(prompt, str):
         return prompt
@@ -380,7 +397,7 @@ async def custom_rm(args, sample: Sample, **kwargs) -> float:
     normalized_prediction = _safe_normalize_final_answer(prediction)
     pred_value = _canonicalize(normalized_prediction)
     raw_pred_value = _canonicalize(prediction)
-    targets = _load_targets(sample.label)
+    targets = _augment_multi_part_targets(_load_targets(sample.label))
     reward = 0.2 if boxed_prediction is not None else 0.0
     matched = False
     for target in targets:
