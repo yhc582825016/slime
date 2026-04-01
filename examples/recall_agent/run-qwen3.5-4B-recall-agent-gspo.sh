@@ -151,8 +151,8 @@ GSPO_ARGS=(
   --kl-loss-type low_var_kl
   --kl-coef 0.00
   --entropy-coef 0.00
-  --eps-clip 0.002
-  --eps-clip-high 0.0028
+  --eps-clip 0.0003
+  --eps-clip-high 0.0004
 )
 
 OPTIMIZER_ARGS=(

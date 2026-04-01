@@ -50,7 +50,7 @@ def _render_system_prompt(tool_schemas: list[dict[str, Any]]) -> str:
     return (
         "You are a helpful tool-using assistant.\n\n"
         "Solve the user's task by reasoning step by step.\n"
-        "When you need a tool, output exactly one tool call in the XML format below:\n"
+        "When you need tools, output one or more tool calls in the XML format below:\n"
         "<tool_call>\n"
         '{"name": "<function-name>", "arguments": {"arg": "value"}}\n'
         "</tool_call>\n\n"

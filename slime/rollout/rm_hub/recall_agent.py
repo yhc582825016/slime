@@ -392,8 +392,11 @@ async def custom_rm(args, sample: Sample, **kwargs) -> float:
 
     metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
     cleaned_response = _strip_special_tokens(_post_think_text(sample.response or ""))
-    boxed_prediction = _extract_last_boxed(cleaned_response)
-    prediction = boxed_prediction if boxed_prediction is not None else _fallback_answer(cleaned_response)
+    # sample.response in interaction rollout includes appended observation text
+    # (e.g., <tool_response>...), so extract answers only from assistant text.
+    answer_scope = _strip_tool_markup(cleaned_response)
+    boxed_prediction = _extract_last_boxed(answer_scope)
+    prediction = boxed_prediction if boxed_prediction is not None else _fallback_answer(answer_scope)
     normalized_prediction = _safe_normalize_final_answer(prediction)
     pred_value = _canonicalize(normalized_prediction)
     raw_pred_value = _canonicalize(prediction)

@@ -1,4 +1,12 @@
 #!/bin/bash
+pkill -9 sglang
+sleep 3
+ray stop --force
+pkill -9 ray
+pkill -9 python
+sleep 3
+pkill -9 ray
+pkill -9 python
 
 set -euo pipefail
 
@@ -6,7 +14,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 cd "${ROOT_DIR}"
 
-export PYTHONUNBUFFERED=1
+export PYTHONBUFFERED=16
 
 HF_CKPT="${HF_CKPT:-/dev/shm/Qwen3.5-4B}"
 MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
@@ -41,7 +49,7 @@ SAVE_INTERVAL="${SAVE_INTERVAL:-200}"
 OVER_SAMPLING_BATCH_SIZE="${OVER_SAMPLING_BATCH_SIZE:-32}"
 
 USE_EVAL="${USE_EVAL:-1}"
-EVAL_INTERVAL="${EVAL_INTERVAL:-50}"
+EVAL_INTERVAL="${EVAL_INTERVAL:-10}"
 EVAL_DATA_NAME="${EVAL_DATA_NAME:-recall_agent_eval}"
 N_SAMPLES_PER_EVAL_PROMPT="${N_SAMPLES_PER_EVAL_PROMPT:-1}"
 EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-24000}"
@@ -136,7 +144,7 @@ PERF_ARGS=(
 GRPO_ARGS=(
   --advantage-estimator grpo
   --use-kl-loss
-  --kl-loss-coef 0.00
+  --kl-loss-coef 0.001
   --kl-loss-type low_var_kl
   --entropy-coef 0.00
   --eps-clip 0.2

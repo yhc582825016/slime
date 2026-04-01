@@ -23,6 +23,7 @@ FUNCTION_BLOCK_RE = re.compile(r"(<function\s*=\s*.*?</function>)", re.DOTALL)
 FUNCTION_TAG_RE = re.compile(r"<function\s*=\s*([a-zA-Z0-9_\-\.]+)\s*>", re.DOTALL)
 PARAM_TAG_RE = re.compile(r"<parameter\s*=\s*([a-zA-Z0-9_\-\.]+)\s*>(.*?)</parameter>", re.DOTALL)
 EOS_MARKERS = ("<|im_end|>", "<|endoftext|>", "</s>")
+BOX_PREFIXES = ("\\boxed{", "boxed{")
 
 
 def _json_loads(value: str) -> dict[str, Any]:
@@ -117,6 +118,19 @@ def _extract_json_candidates(text: str) -> list[str]:
     return candidates
 
 
+def _extract_balanced_content(text: str, open_brace_idx: int) -> str | None:
+    depth = 0
+    for idx in range(open_brace_idx, len(text)):
+        ch = text[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_brace_idx + 1 : idx]
+    return None
+
+
 class RecallAgentEnv(BaseInteractionEnv):
     def __init__(self, *, env_code: str, tool_schemas: list[dict[str, Any]], max_turns: int | None = None):
         self.env_code = env_code
@@ -195,9 +209,36 @@ class RecallAgentEnv(BaseInteractionEnv):
         text = text or ""
         return any(marker in text for marker in EOS_MARKERS)
 
+    def _has_final_boxed_answer(self, text: str) -> bool:
+        text = text or ""
+        if "<tool_call>" in text:
+            # If model still emits tool markup, treat it as an ongoing interaction turn.
+            return False
+        for prefix in BOX_PREFIXES:
+            idx = text.rfind(prefix)
+            if idx < 0:
+                continue
+            open_brace_idx = text.find("{", idx)
+            if open_brace_idx < 0:
+                continue
+            content = _extract_balanced_content(text, open_brace_idx)
+            if content is not None and content.strip():
+                return True
+        return False
+
     def _has_tool_call_markup(self, text: str) -> bool:
         text = text or ""
         return "<tool_call>" in text or "</tool_call>" in text
+
+    def _is_tool_allowed(self, tool_name: str) -> bool:
+        if tool_name in self.supported_tools:
+            return True
+        if self.supported_tools:
+            return False
+        if not tool_name or tool_name.startswith("_"):
+            return False
+        target_fn = self.runtime_env.get(tool_name)
+        return callable(target_fn)
 
     def _serialize_result(self, value: Any) -> str:
         if isinstance(value, str):
@@ -267,15 +308,24 @@ class RecallAgentEnv(BaseInteractionEnv):
                     "role": "tool",
                 }
                 return obs, done, info
-            # End only when the model emits no tool call and reaches an EOS marker.
-            if self._has_terminal_eos(response_text):
-                info.update({"tool_executed": False, "final_answer_detected": True})
-                return {"obs_str": "Final answer detected via EOS marker.", "role": "tool"}, True, info
+            # End when no tool call is emitted and model provides a terminal signal.
+            # Many models do not always emit EOS markers, so also accept final boxed answers.
+            has_eos = self._has_terminal_eos(response_text)
+            has_boxed_answer = self._has_final_boxed_answer(response_text)
+            if has_eos or has_boxed_answer:
+                info.update(
+                    {
+                        "tool_executed": False,
+                        "final_answer_detected": True,
+                        "final_answer_reason": "eos" if has_eos else "boxed",
+                    }
+                )
+                return {"obs_str": "Final answer detected.", "role": "tool"}, True, info
             info["tool_executed"] = False
             obs = {
                 "obs_str": (
                     "<tool_response>Error: no valid tool call detected.</tool_response>\n"
-                    "Please output exactly one valid <tool_call>...</tool_call> block.\n"
+                    "Please output one or more valid <tool_call>...</tool_call> blocks.\n"
                     f"{self._turn_hint()}"
                 ),
                 "role": "tool",
@@ -287,7 +337,7 @@ class RecallAgentEnv(BaseInteractionEnv):
         for idx, tool_call in enumerate(tool_calls, start=1):
             tool_name = str(tool_call.get("name") or "").strip()
             arguments = tool_call.get("arguments") or {}
-            if tool_name not in self.supported_tools:
+            if not self._is_tool_allowed(tool_name):
                 tool_result = f"Error: unsupported tool `{tool_name}`."
                 executed_calls.append(
                     {
