@@ -4,6 +4,8 @@ import ast
 import json
 import os
 import re
+import sys
+from pathlib import Path
 from typing import Any
 
 from slime.rollout.rm_hub.math_utils import extract_answer, grade_answer_mathd, grade_answer_sympy
@@ -71,6 +73,10 @@ DEBUG_REWARD = os.getenv("RECALL_AGENT_DEBUG_REWARD", "1") == "1"
 DEBUG_REWARD_EVERY = max(1, int(os.getenv("RECALL_AGENT_DEBUG_REWARD_EVERY", "1")))
 DEBUG_RESPONSE_MAX_CHARS = max(200, int(os.getenv("RECALL_AGENT_DEBUG_RESPONSE_MAX_CHARS", "4000")))
 _DEBUG_COUNTER = 0
+
+_BFCL_CHECKER_IMPORTED = False
+_BFCL_MULTI_TURN_CHECKER = None
+_BFCL_MULTI_TURN_IRRELEVANCE_CHECKER = None
 
 
 def _strip_special_tokens(text: str) -> str:
@@ -344,12 +350,32 @@ def _augment_multi_part_targets(targets: list[str]) -> list[str]:
         return list(targets)
     out = list(targets)
     seen = set(targets)
-    for sep in (", ", "; ", " | ", ","):
+    for sep in (", ", "; ", " | ", ","," "):
         merged = sep.join(targets)
         if merged not in seen:
             seen.add(merged)
             out.append(merged)
     return out
+
+
+def _prediction_matches_any_target(prediction: str, targets: list[str]) -> bool:
+    normalized_prediction = _safe_normalize_final_answer(prediction)
+    pred_value = _canonicalize(normalized_prediction)
+    raw_pred_value = _canonicalize(prediction)
+    for target in targets:
+        for candidate in _target_candidates(target):
+            normalized_candidate = _safe_normalize_final_answer(candidate)
+            if (
+                _relaxed_match(prediction, candidate)
+                or raw_pred_value == _canonicalize(candidate)
+                or pred_value == _canonicalize(candidate)
+                or _math_equivalent_match(prediction, candidate)
+                or pred_value == _canonicalize(normalized_candidate)
+                or _relaxed_match(normalized_prediction, normalized_candidate)
+                or _math_equivalent_match(normalized_prediction, normalized_candidate)
+            ):
+                return True
+    return False
 
 
 def _prompt_to_text(prompt: Any) -> str:
@@ -376,6 +402,168 @@ def _prompt_to_text(prompt: Any) -> str:
     return str(prompt)
 
 
+def _ensure_bfcl_checker_loaded(metadata: dict[str, Any]) -> None:
+    global _BFCL_CHECKER_IMPORTED, _BFCL_MULTI_TURN_CHECKER, _BFCL_MULTI_TURN_IRRELEVANCE_CHECKER
+    if _BFCL_CHECKER_IMPORTED:
+        return
+
+    bfcl_root = metadata.get("bfcl_root") or "/dev/shm/ye/gorilla/berkeley-function-call-leaderboard"
+    bfcl_root = str(bfcl_root)
+    if bfcl_root not in sys.path:
+        sys.path.insert(0, bfcl_root)
+
+    from bfcl_eval.eval_checker.multi_turn_eval.multi_turn_checker import (  # type: ignore
+        multi_turn_checker,
+        multi_turn_irrelevance_checker,
+    )
+
+    _BFCL_MULTI_TURN_CHECKER = multi_turn_checker
+    _BFCL_MULTI_TURN_IRRELEVANCE_CHECKER = multi_turn_irrelevance_checker
+    _BFCL_CHECKER_IMPORTED = True
+
+
+def _tool_call_to_python_call(name: str, arguments: dict[str, Any]) -> str:
+    if not arguments:
+        return f"{name}()"
+    joined = ", ".join(f"{key}={repr(value)}" for key, value in arguments.items())
+    return f"{name}({joined})"
+
+
+def _extract_bfcl_tool_calls_from_text(text: str) -> list[str]:
+    tool_calls: list[str] = []
+    for block in re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", text or "", flags=re.DOTALL):
+        decoder_candidates: list[Any] = []
+        block = block.strip()
+        if not block:
+            continue
+        decoder_candidates.append(block)
+
+        balanced_candidates: list[str] = []
+        depth = 0
+        start = None
+        in_string = False
+        escaped = False
+        for idx, ch in enumerate(block):
+            if ch == "\\" and not escaped:
+                escaped = True
+                continue
+            if ch == '"' and not escaped:
+                in_string = not in_string
+            if not in_string:
+                if ch == "{":
+                    if start is None:
+                        start = idx
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        balanced_candidates.append(block[start : idx + 1])
+                        start = None
+            escaped = False
+        decoder_candidates.extend(balanced_candidates)
+
+        parsed_payload = None
+        for candidate in decoder_candidates:
+            try:
+                parsed_payload = json.loads(candidate)
+                break
+            except Exception:
+                continue
+        if not isinstance(parsed_payload, dict):
+            continue
+
+        name = parsed_payload.get("name")
+        arguments = parsed_payload.get("arguments", {})
+        function_wrapper = parsed_payload.get("function")
+        if (not name) and isinstance(function_wrapper, dict):
+            name = function_wrapper.get("name")
+            arguments = function_wrapper.get("arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except Exception:
+                arguments = {}
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(arguments, dict):
+            arguments = {}
+        tool_calls.append(_tool_call_to_python_call(name.strip(), arguments))
+    return tool_calls
+
+
+def _build_bfcl_model_result_trace(metadata: dict[str, Any]) -> list[list[list[str]]]:
+    trace = metadata.get("bfcl_rollout_trace") or {}
+    turns = trace.get("turns") or []
+    model_result: list[list[list[str]]] = []
+    for turn in turns:
+        if not isinstance(turn, list):
+            model_result.append([])
+            continue
+        step_results: list[list[str]] = []
+        for step in turn:
+            if not isinstance(step, dict):
+                continue
+            response_text = str(step.get("response_text") or "")
+            decoded_calls = _extract_bfcl_tool_calls_from_text(response_text)
+            if decoded_calls:
+                step_results.append(decoded_calls)
+        model_result.append(step_results)
+    return model_result
+
+
+def _bfcl_multi_turn_reward(sample: Sample, metadata: dict[str, Any]) -> float:
+    _ensure_bfcl_checker_loaded(metadata)
+
+    ground_truth_turns = metadata.get("bfcl_ground_truth_turns") or []
+    test_entry = metadata.get("bfcl_test_entry") or {}
+    test_category = metadata.get("bfcl_category") or str(test_entry.get("id") or "").rsplit("_", 1)[0]
+    model_result_trace = _build_bfcl_model_result_trace(metadata)
+
+    if len(model_result_trace) < len(ground_truth_turns):
+        model_result_trace.extend([[] for _ in range(len(ground_truth_turns) - len(model_result_trace))])
+    elif len(model_result_trace) > len(ground_truth_turns):
+        model_result_trace = model_result_trace[: len(ground_truth_turns)]
+
+    valid = True
+    checker_result = _BFCL_MULTI_TURN_CHECKER(
+        model_result_trace,
+        ground_truth_turns,
+        test_entry,
+        test_category,
+        "slime_bfcl_eval",
+    )
+    if not checker_result.get("valid", False):
+        valid = False
+
+    irrelevance_result = _BFCL_MULTI_TURN_IRRELEVANCE_CHECKER(
+        model_result_trace,
+        ground_truth_turns,
+    )
+    if not irrelevance_result.get("valid", False):
+        valid = False
+
+    if DEBUG_REWARD:
+        print(
+            "[bfcl_multi_turn_reward_debug] "
+            + json.dumps(
+                {
+                    "sample_index": metadata.get("index"),
+                    "test_category": test_category,
+                    "valid": valid,
+                    "model_result_trace": model_result_trace,
+                    "ground_truth_turns": ground_truth_turns,
+                    "checker_result": checker_result,
+                    "irrelevance_result": irrelevance_result,
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
+            flush=True,
+        )
+
+    return 1.0 if valid else 0.0
+
+
 def _shorten_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
@@ -391,36 +579,26 @@ async def custom_rm(args, sample: Sample, **kwargs) -> float:
         raise TypeError("sample must be an instance of slime.utils.types.Sample")
 
     metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+    if metadata.get("bfcl_eval_mode") or metadata.get("data_source") == "bfcl_multi_turn":
+        return _bfcl_multi_turn_reward(sample, metadata)
+
     cleaned_response = _strip_special_tokens(_post_think_text(sample.response or ""))
     # sample.response in interaction rollout includes appended observation text
     # (e.g., <tool_response>...), so extract answers only from assistant text.
     answer_scope = _strip_tool_markup(cleaned_response)
     boxed_prediction = _extract_last_boxed(answer_scope)
     prediction = boxed_prediction if boxed_prediction is not None else _fallback_answer(answer_scope)
-    normalized_prediction = _safe_normalize_final_answer(prediction)
-    pred_value = _canonicalize(normalized_prediction)
-    raw_pred_value = _canonicalize(prediction)
     targets = _augment_multi_part_targets(_load_targets(sample.label))
-    reward = 0.2 if boxed_prediction is not None else 0.0
-    matched = False
-    for target in targets:
-        for candidate in _target_candidates(target):
-            normalized_candidate = _safe_normalize_final_answer(candidate)
-            if (
-                _relaxed_match(prediction, candidate)
-                or raw_pred_value == _canonicalize(candidate)
-                or pred_value == _canonicalize(candidate)
-                or _math_equivalent_match(prediction, candidate)
-                or pred_value == _canonicalize(normalized_candidate)
-                or _relaxed_match(normalized_prediction, normalized_candidate)
-                or _math_equivalent_match(normalized_prediction, normalized_candidate)
-            ):
-                matched = True
-                break
-        if matched:
-            break
-    if matched:
-        reward += 0.8
+
+    # Prefer boxed payload: if it matches ground truth, full credit immediately.
+    if boxed_prediction is not None and _prediction_matches_any_target(boxed_prediction, targets):
+        reward = 1.0
+    else:
+        reward = 0.2 if boxed_prediction is not None else 0.0
+        if _prediction_matches_any_target(prediction, targets):
+            reward += 0.8
+
+    normalized_prediction = _safe_normalize_final_answer(prediction)
 
     if DEBUG_REWARD:
         _DEBUG_COUNTER += 1
@@ -442,5 +620,8 @@ async def custom_rm(args, sample: Sample, **kwargs) -> float:
                 "ground_truth": targets,
                 "reward": reward,
             }
-            print(f"[recall_agent_reward_debug] {json.dumps(log_payload, ensure_ascii=False)}", flush=True)
+            print(
+                f"[recall_agent_reward_debug] {json.dumps(log_payload, ensure_ascii=False, default=str)}",
+                flush=True,
+            )
     return reward

@@ -24,6 +24,9 @@ FUNCTION_TAG_RE = re.compile(r"<function\s*=\s*([a-zA-Z0-9_\-\.]+)\s*>", re.DOTA
 PARAM_TAG_RE = re.compile(r"<parameter\s*=\s*([a-zA-Z0-9_\-\.]+)\s*>(.*?)</parameter>", re.DOTALL)
 EOS_MARKERS = ("<|im_end|>", "<|endoftext|>", "</s>")
 BOX_PREFIXES = ("\\boxed{", "boxed{")
+BFCL_ADDITIONAL_FUNCTION_PROMPT = (
+    "I have updated some more functions you can choose from. What about now?"
+)
 
 
 def _json_loads(value: str) -> dict[str, Any]:
@@ -68,6 +71,63 @@ def _safe_json_loads(value: Any) -> Any:
         return _json_loads(value)
     except Exception:
         return value
+
+
+def _tool_name_from_schema(tool: Any) -> str | None:
+    if not isinstance(tool, dict):
+        return None
+    if isinstance(tool.get("function"), dict):
+        name = tool["function"].get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    name = tool.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
+
+
+def _extract_text_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, dict):
+            if item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item.get("text") or item.get("content") or item))
+        else:
+            parts.append(str(item))
+    return "\n".join(part for part in parts if part)
+
+
+def _render_turn_messages(messages: list[dict[str, Any]]) -> str:
+    rendered: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            rendered.append(str(message))
+            continue
+        role = str(message.get("role") or "user")
+        content = _extract_text_content(message.get("content", ""))
+        if not content.strip():
+            continue
+        if role == "user":
+            rendered.append(content.strip())
+        else:
+            rendered.append(f"[{role}] {content.strip()}")
+    return "\n\n".join(rendered)
+
+
+def _render_tool_block(tool_schemas: list[dict[str, Any]]) -> str:
+    if not tool_schemas:
+        return ""
+    tool_lines = [_json_dumps(tool) for tool in tool_schemas if isinstance(tool, dict)]
+    if not tool_lines:
+        return ""
+    return "<tools>\n" + "\n".join(tool_lines) + "\n</tools>"
 
 
 def _extract_from_function_parameter_markup(text: str) -> dict[str, Any] | None:
@@ -132,23 +192,42 @@ def _extract_balanced_content(text: str, open_brace_idx: int) -> str | None:
 
 
 class RecallAgentEnv(BaseInteractionEnv):
-    def __init__(self, *, env_code: str, tool_schemas: list[dict[str, Any]], max_turns: int | None = None):
+    def __init__(
+        self,
+        *,
+        env_code: str,
+        tool_schemas: list[dict[str, Any]],
+        max_turns: int | None = None,
+        conversation_turns: list[list[dict[str, Any]]] | None = None,
+        additional_tools_by_turn: dict[str, list[dict[str, Any]]] | dict[int, list[dict[str, Any]]] | None = None,
+    ):
         self.env_code = env_code
         self.tool_schemas = tool_schemas
         self.max_turns = max_turns
+        self.conversation_turns = conversation_turns or []
+        self.additional_tools_by_turn = {
+            int(key): value
+            for key, value in (additional_tools_by_turn or {}).items()
+            if isinstance(value, list)
+        }
         self.turn = 0
+        self.conversation_turn_index = 0
         self.runtime_env: dict[str, Any] = {}
         self.init_error: str | None = None
-        self.supported_tools = {
-            tool.get("function", {}).get("name")
-            for tool in tool_schemas
-            if isinstance(tool, dict) and tool.get("function", {}).get("name")
-        }
+        self.active_tool_schemas: list[dict[str, Any]] = []
+        self.supported_tools: set[str] = set()
 
     def reset(self):
         self.turn = 0
+        self.conversation_turn_index = 0
         self.runtime_env = {}
         self.init_error = None
+        self.active_tool_schemas = deepcopy(self.tool_schemas)
+        self.supported_tools = {
+            tool_name
+            for tool_name in (_tool_name_from_schema(tool) for tool in self.active_tool_schemas)
+            if tool_name
+        }
         if self.env_code.strip():
             try:
                 exec(self.env_code, self.runtime_env, self.runtime_env)
@@ -240,6 +319,37 @@ class RecallAgentEnv(BaseInteractionEnv):
         target_fn = self.runtime_env.get(tool_name)
         return callable(target_fn)
 
+    def _build_next_turn_observation(self) -> dict[str, Any] | None:
+        next_turn_index = self.conversation_turn_index + 1
+        if next_turn_index >= len(self.conversation_turns):
+            return None
+
+        self.conversation_turn_index = next_turn_index
+        chunks: list[str] = []
+
+        new_tools = self.additional_tools_by_turn.get(next_turn_index, [])
+        if new_tools:
+            self.active_tool_schemas.extend(deepcopy(new_tools))
+            self.supported_tools = {
+                tool_name
+                for tool_name in (_tool_name_from_schema(tool) for tool in self.active_tool_schemas)
+                if tool_name
+            }
+            chunks.append("Additional tools are now available:")
+            tool_block = _render_tool_block(new_tools)
+            if tool_block:
+                chunks.append(tool_block)
+
+        turn_text = _render_turn_messages(self.conversation_turns[next_turn_index])
+        if turn_text:
+            chunks.append(turn_text)
+        elif new_tools:
+            chunks.append(BFCL_ADDITIONAL_FUNCTION_PROMPT)
+        else:
+            chunks.append("Proceed to the next user turn.")
+
+        return {"obs_str": "\n\n".join(chunk for chunk in chunks if chunk), "role": "user"}
+
     def _serialize_result(self, value: Any) -> str:
         if isinstance(value, str):
             return value
@@ -308,6 +418,16 @@ class RecallAgentEnv(BaseInteractionEnv):
                     "role": "tool",
                 }
                 return obs, done, info
+            next_turn_obs = self._build_next_turn_observation()
+            if next_turn_obs is not None:
+                info.update(
+                    {
+                        "tool_executed": False,
+                        "advanced_turn": True,
+                        "conversation_turn_index": self.conversation_turn_index,
+                    }
+                )
+                return next_turn_obs, done, info
             # End when no tool call is emitted and model provides a terminal signal.
             # Many models do not always emit EOS markers, so also accept final boxed answers.
             has_eos = self._has_terminal_eos(response_text)
@@ -324,11 +444,11 @@ class RecallAgentEnv(BaseInteractionEnv):
             info["tool_executed"] = False
             obs = {
                 "obs_str": (
-                    "<tool_response>Error: no valid tool call detected.</tool_response>\n"
-                    "Please output one or more valid <tool_call>...</tool_call> blocks.\n"
-                    f"{self._turn_hint()}"
+                    "All user turns are complete.\n"
+                    "Please provide the final ordered list of tool calls across all turns in "
+                    "\\boxed{[\"func(arg=...)\", ...]} and do not call more tools."
                 ),
-                "role": "tool",
+                "role": "user",
             }
             return obs, done, info
 
@@ -384,8 +504,20 @@ def build_env(sample: Sample | None = None, args: Any | None = None, **_: Any) -
     tool_schemas = metadata.get("tool_schemas") or metadata.get("tools") or []
     if not isinstance(tool_schemas, list):
         tool_schemas = []
+    conversation_turns = metadata.get("conversation_turns") or []
+    if not isinstance(conversation_turns, list):
+        conversation_turns = []
+    additional_tools_by_turn = metadata.get("additional_tools_by_turn") or {}
+    if not isinstance(additional_tools_by_turn, dict):
+        additional_tools_by_turn = {}
 
     max_turns = getattr(args, "max_turns", None)
     if max_turns is None:
         raise ValueError("max_turns must be set via --custom-config-path.")
-    return RecallAgentEnv(env_code=env_code, tool_schemas=tool_schemas, max_turns=max_turns)
+    return RecallAgentEnv(
+        env_code=env_code,
+        tool_schemas=tool_schemas,
+        max_turns=max_turns,
+        conversation_turns=conversation_turns,
+        additional_tools_by_turn=additional_tools_by_turn,
+    )

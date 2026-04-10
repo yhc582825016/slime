@@ -19,16 +19,21 @@ export PYTHONBUFFERED=16
 HF_CKPT="${HF_CKPT:-/dev/shm/Qwen3.5-4B}"
 MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
 
-RAW_TRAIN="${RAW_TRAIN:-/dev/shm/ye/slime/examples/recall_agent/train_filtered.parquet}"
-RAW_TEST="${RAW_TEST:-/dev/shm/ye/slime/examples/recall_agent/test_filtered.parquet}"
+RAW_TRAIN="${RAW_TRAIN:-/dev/shm/ye/rl-data/agent_syn_data/recall/synthetic_mock_success_only_5.parquet}"
+RAW_TEST="${RAW_TEST:-/dev/shm/ye/rl-data/agent_syn_data/test_filtered.parquet}"
 PROMPT_DATA_DIR="${PROMPT_DATA_DIR:-${SCRIPT_DIR}/data}"
+USE_BFCL_MULTI_TURN_EVAL="${USE_BFCL_MULTI_TURN_EVAL:-1}"
+BFCL_ROOT="${BFCL_ROOT:-/dev/shm/ye/gorilla/berkeley-function-call-leaderboard}"
+BFCL_MULTI_TURN_SAMPLE_SIZE="${BFCL_MULTI_TURN_SAMPLE_SIZE:-200}"
+BFCL_MULTI_TURN_SAMPLE_SEED="${BFCL_MULTI_TURN_SAMPLE_SEED:-42}"
+BFCL_MULTI_TURN_EVAL_JSONL="${BFCL_MULTI_TURN_EVAL_JSONL:-${PROMPT_DATA_DIR}/bfcl_multi_turn_test_${BFCL_MULTI_TURN_SAMPLE_SIZE}.jsonl}"
 PROMPT_TRAIN="${PROMPT_TRAIN:-${PROMPT_DATA_DIR}/train.jsonl}"
 PROMPT_TEST="${PROMPT_TEST:-${PROMPT_DATA_DIR}/test.jsonl}"
 echo "PROMPT_TRAIN: ${PROMPT_TRAIN}"
 echo "PROMPT_TEST: ${PROMPT_TEST}"
 REF_LOAD="${REF_LOAD:-/dev/shm/Qwen3.5-4B-Thinking_torch_dist}"
 LOAD_PATH="${LOAD_PATH:-${REF_LOAD}}"
-SAVE_PATH="${SAVE_PATH:-/dev/shm/Qwen3.5-4B-Thinking_recall_agent}"
+SAVE_PATH="${SAVE_PATH:-/dev/shm/Qwen3.5-4B-Thinking_recall_agent_408}"
 RECALL_AGENT_JOB_LOG="${RECALL_AGENT_JOB_LOG:-/dev/shm/ye/logs/recall_agent_$(date +%Y%m%d_%H%M%S).log}"
 
 NUM_GPUS="${NUM_GPUS:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}"
@@ -37,7 +42,7 @@ if [[ -z "${NUM_GPUS}" || "${NUM_GPUS}" -le 0 ]]; then
 fi
 
 TP_SIZE="${TP_SIZE:-4}"
-ROLLOUT_NUM_GPUS_PER_ENGINE="${ROLLOUT_NUM_GPUS_PER_ENGINE:-1}"
+ROLLOUT_NUM_GPUS_PER_ENGINE="${ROLLOUT_NUM_GPUS_PER_ENGINE:-2}"
 
 MAX_TOKENS_PER_GPU="${MAX_TOKENS_PER_GPU:-6144}"
 ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-24000}"
@@ -45,7 +50,7 @@ NUM_ROLLOUT="${NUM_ROLLOUT:-4000}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-128}"
-SAVE_INTERVAL="${SAVE_INTERVAL:-200}"
+SAVE_INTERVAL="${SAVE_INTERVAL:-100}"
 OVER_SAMPLING_BATCH_SIZE="${OVER_SAMPLING_BATCH_SIZE:-32}"
 
 USE_EVAL="${USE_EVAL:-1}"
@@ -89,6 +94,19 @@ python "${SCRIPT_DIR}/preprocess_recall_agent_data.py" \
   --test-input "${RAW_TEST}" \
   --output-dir "${PROMPT_DATA_DIR}"
 
+if [[ "${USE_BFCL_MULTI_TURN_EVAL}" == "1" ]]; then
+  echo "[step] preparing BFCL multi-turn eval set (${BFCL_MULTI_TURN_SAMPLE_SIZE} samples, seed=${BFCL_MULTI_TURN_SAMPLE_SEED})..."
+  python "${SCRIPT_DIR}/prepare_bfcl_multi_turn_eval.py" \
+    --bfcl-root "${BFCL_ROOT}" \
+    --output-path "${BFCL_MULTI_TURN_EVAL_JSONL}" \
+    --sample-size "${BFCL_MULTI_TURN_SAMPLE_SIZE}" \
+    --seed "${BFCL_MULTI_TURN_SAMPLE_SEED}"
+  PROMPT_TEST="${BFCL_MULTI_TURN_EVAL_JSONL}"
+fi
+
+echo "PROMPT_TRAIN (resolved): ${PROMPT_TRAIN}"
+echo "PROMPT_TEST (resolved): ${PROMPT_TEST}"
+
 if [[ ! -d "${REF_LOAD}" ]]; then
   echo "[step] converting HF checkpoint -> torch_dist..."
   source "${ROOT_DIR}/scripts/models/qwen3.5-4B.sh"
@@ -130,7 +148,7 @@ ROLLOUT_ARGS=(
 PERF_ARGS=(
   --tensor-model-parallel-size "${TP_SIZE}"
   --sequence-parallel
-  --pipeline-model-parallel-size 1
+  --pipeline-model-parallel-size 2
   --context-parallel-size 1
   --expert-model-parallel-size 1
   --expert-tensor-parallel-size 1
@@ -144,7 +162,7 @@ PERF_ARGS=(
 GRPO_ARGS=(
   --advantage-estimator grpo
   --use-kl-loss
-  --kl-loss-coef 0.001
+  --kl-loss-coef 0.00
   --kl-loss-type low_var_kl
   --entropy-coef 0.00
   --eps-clip 0.2

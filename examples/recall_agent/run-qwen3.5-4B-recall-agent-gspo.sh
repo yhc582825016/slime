@@ -211,7 +211,7 @@ if [[ "${USE_WANDB}" == "1" ]]; then
   fi
 fi
 
-OFFLOAD_ARGS+=(--no-offload-train)
+OFFLOAD_ARGS+=(--offload)
 
 echo "[step] restarting ray..."
 ray stop --force || true
