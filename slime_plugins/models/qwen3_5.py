@@ -12,32 +12,13 @@ from megatron.core.transformer.transformer_block import get_num_layers_to_build
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 from transformers.activations import ACT2FN
 
-
-def _load_hf_config(checkpoint_path):
-    """Load HF config, handling cases where transformers doesn't know the model type."""
-    try:
-        from transformers import AutoConfig
-
-        return AutoConfig.from_pretrained(checkpoint_path, trust_remote_code=True)
-    except (ValueError, KeyError):
-        # Fallback: load config.json directly as a SimpleNamespace
-        config_path = os.path.join(checkpoint_path, "config.json")
-        with open(config_path) as f:
-            config_dict = json.load(f)
-        # If there's a text_config, also make it a namespace
-        ns = type("HFConfig", (), config_dict)()
-        if "text_config" in config_dict:
-            ns.text_config = type("TextConfig", (), config_dict["text_config"])()
-        return ns
-
-
 try:
     from fla.modules import FusedRMSNormGated, ShortConvolution
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 except ImportError:
     pass
 
-from .hf_attention import HuggingfaceAttention
+from .hf_attention import HuggingfaceAttention, _load_hf_config
 
 logger = logging.getLogger(__name__)
 
