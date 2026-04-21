@@ -1,0 +1,59 @@
+{
+  "root": "/mnt/code/yehangcheng/slime/examples/multi_agent",
+  "file_count": 4,
+  "module_count": 4,
+  "tree_lines": [
+    "├── __init__.py",
+    "├── agent_system.py",
+    "├── prompts.py",
+    "└── rollout_with_multi_agents.py"
+  ],
+  "modules": [
+    {
+      "module": "__init__",
+      "file": "__init__.py",
+      "internal_dependencies": [],
+      "external_dependencies": []
+    },
+    {
+      "module": "agent_system",
+      "file": "agent_system.py",
+      "internal_dependencies": [
+        "prompts"
+      ],
+      "external_dependencies": [
+        "asyncio",
+        "copy",
+        "re",
+        "slime.rollout.rm_hub",
+        "slime.utils.http_utils",
+        "slime.utils.types",
+        "time",
+        "traceback"
+      ]
+    },
+    {
+      "module": "prompts",
+      "file": "prompts.py",
+      "internal_dependencies": [],
+      "external_dependencies": []
+    },
+    {
+      "module": "rollout_with_multi_agents",
+      "file": "rollout_with_multi_agents.py",
+      "internal_dependencies": [],
+      "external_dependencies": [
+        "random",
+        "slime.utils.misc",
+        "slime.utils.types",
+        "transformers"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "agent_system",
+      "to": "prompts"
+    }
+  ]
+}

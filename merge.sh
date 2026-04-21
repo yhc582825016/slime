@@ -1,7 +1,7 @@
-cd /dev/shm/ye/slime
-PYTHONPATH="/root/Megatron-LM:/dev/shm/ye/slime" \
+cd /mnt/code/yehangcheng/slime
+PYTHONPATH="/mnt/code/yehangcheng/slime" \
 python tools/convert_torch_dist_to_hf_parallel.py \
-  --input-dir /dev/shm/Qwen3.5-4B-Thinking_recall_agent/iter_0000199 \
-  --output-dir /dev/shm/Qwen3.5-4B-Thinking_recall_agent_hf/iter_0000199 \
-  --origin-hf-dir /dev/shm/Qwen3.5-4B \
+  --input-dir /mnt/code/yehangcheng/checkpoint/General_model/slime/Qwen3.5-9B-Thinking_recall_agent/iter_0000199\
+  --output-dir /opt/users/ye/checkpoints/Qwen3.5-9B-Thinking_recall_agent_hf \
+  --origin-hf-dir /opt/users/models/Qwen3.5-9B \
   --load-max-workers 4

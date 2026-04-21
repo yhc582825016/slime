@@ -1,6 +1,14 @@
 #!/bin/bash
 
 set -euo pipefail
+# pkill -9 sglang || true
+# sleep 3
+# ray stop --force
+# pkill -9 ray || true
+# pkill -9 python || true
+# sleep 3
+# pkill -9 ray || true
+# pkill -9 python || true
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
@@ -21,10 +29,9 @@ echo "PROMPT_TRAIN: ${PROMPT_TRAIN}"
 echo "PROMPT_TEST: ${PROMPT_TEST}"
 REF_LOAD="${REF_LOAD:-/mnt/code/yehangcheng/checkpoint/Qwen3.5-9B-Thinking_torch_dist}"
 LOAD_PATH="${LOAD_PATH:-${REF_LOAD}}"
-SAVE_PATH="${SAVE_PATH:-/mnt/code/yehangcheng/checkpoint/General_model/slime/Qwen3.5-9B-Thinking_recall_agent}"
+SAVE_PATH="${SAVE_PATH:-/mnt/code/yehangcheng/checkpoint/General_model/slime/Qwen3.5-9B-Thinking_recall_agent_2}"
 RECALL_AGENT_JOB_LOG="${RECALL_AGENT_JOB_LOG:-/mnt/code/yehangcheng/logs/recall_agent_$(date +%Y%m%d_%H%M%S).log}"
 
-# 训练使用 4 张 GPU；若机器多于 4 张且未手动设置 CUDA_VISIBLE_DEVICES，则自动选用物理编号最大的后 4 张卡。
 NUM_GPUS="${NUM_GPUS:-8}"
 TP_SIZE="${TP_SIZE:-4}"
 ROLLOUT_NUM_GPUS_PER_ENGINE="${ROLLOUT_NUM_GPUS_PER_ENGINE:-1}"
@@ -34,21 +41,21 @@ CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-0}"
 
 # 显存友好默认（colocate 训练+SGLang 易在权更后 OOM，仍可用环境变量覆盖并按卡调高）。
 MAX_TOKENS_PER_GPU="${MAX_TOKENS_PER_GPU:-3072}"
-ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-16384}"
+ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-24000}"
 NUM_ROLLOUT="${NUM_ROLLOUT:-4000}"
-ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-16}"
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
-GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-SAVE_INTERVAL="${SAVE_INTERVAL:-200}"
-OVER_SAMPLING_BATCH_SIZE="${OVER_SAMPLING_BATCH_SIZE:-16}"
-SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.48}"
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-128}"
+SAVE_INTERVAL="${SAVE_INTERVAL:-50}"
+OVER_SAMPLING_BATCH_SIZE="${OVER_SAMPLING_BATCH_SIZE:-32}"
+SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.55}"
 LOG_PROBS_CHUNK_SIZE="${LOG_PROBS_CHUNK_SIZE:-512}"
 
 USE_EVAL="${USE_EVAL:-1}"
 EVAL_INTERVAL="${EVAL_INTERVAL:-10}"
 EVAL_DATA_NAME="${EVAL_DATA_NAME:-recall_agent_eval}"
 N_SAMPLES_PER_EVAL_PROMPT="${N_SAMPLES_PER_EVAL_PROMPT:-1}"
-EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-16384}"
+EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-24000}"
 
 USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime}"
@@ -122,6 +129,7 @@ ROLLOUT_ARGS=(
   --rollout-temperature 1.0
   --global-batch-size "${GLOBAL_BATCH_SIZE}"
   --balance-data
+  --log-passrate
 )
 
 PERF_ARGS=(

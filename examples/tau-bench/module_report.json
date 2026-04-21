@@ -1,0 +1,100 @@
+{
+  "root": "/mnt/code/yehangcheng/slime/examples/tau-bench",
+  "file_count": 5,
+  "module_count": 5,
+  "tree_lines": [
+    "├── generate_with_tau.py",
+    "├── openai_tool_adapter.py",
+    "├── sglang_tool_parser.py",
+    "├── tau1_mock.py",
+    "└── trainable_agents.py"
+  ],
+  "modules": [
+    {
+      "module": "generate_with_tau",
+      "file": "generate_with_tau.py",
+      "internal_dependencies": [
+        "trainable_agents"
+      ],
+      "external_dependencies": [
+        "logging",
+        "os",
+        "slime.utils.types",
+        "tau_bench.envs",
+        "tau_bench.types",
+        "typing"
+      ]
+    },
+    {
+      "module": "openai_tool_adapter",
+      "file": "openai_tool_adapter.py",
+      "internal_dependencies": [
+        "sglang_tool_parser"
+      ],
+      "external_dependencies": [
+        "dataclasses",
+        "json",
+        "logging",
+        "tau_bench.agents.tool_calling_agent",
+        "tau_bench.types",
+        "typing"
+      ]
+    },
+    {
+      "module": "sglang_tool_parser",
+      "file": "sglang_tool_parser.py",
+      "internal_dependencies": [],
+      "external_dependencies": [
+        "sglang.srt.function_call.function_call_parser",
+        "sglang.srt.managers.io_struct",
+        "typing"
+      ]
+    },
+    {
+      "module": "tau1_mock",
+      "file": "tau1_mock.py",
+      "internal_dependencies": [],
+      "external_dependencies": [
+        "argparse",
+        "json",
+        "os",
+        "tau_bench.envs",
+        "tau_bench.types"
+      ]
+    },
+    {
+      "module": "trainable_agents",
+      "file": "trainable_agents.py",
+      "internal_dependencies": [
+        "openai_tool_adapter"
+      ],
+      "external_dependencies": [
+        "dataclasses",
+        "enum",
+        "json",
+        "logging",
+        "slime.rollout.sglang_rollout",
+        "slime.utils.http_utils",
+        "tau_bench.agents.base",
+        "tau_bench.agents.tool_calling_agent",
+        "tau_bench.types",
+        "transformers",
+        "typing"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "generate_with_tau",
+      "to": "trainable_agents"
+    },
+    {
+      "from": "openai_tool_adapter",
+      "to": "sglang_tool_parser"
+    },
+    {
+      "from": "trainable_agents",
+      "to": "openai_tool_adapter"
+    }
+  ]
+}
