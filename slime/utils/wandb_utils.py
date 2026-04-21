@@ -7,6 +7,24 @@ import wandb
 logger = logging.getLogger(__name__)
 
 
+def _disable_wandb_for_current_process(args, reason: str, exc: Exception | None = None) -> None:
+    message = f"Disabling W&B in current process: {reason}"
+    if exc is None:
+        logger.warning(message)
+    else:
+        logger.warning("%s (%s: %s)", message, type(exc).__name__, exc)
+
+    args.use_wandb = False
+    args.wandb_mode = "disabled"
+    os.environ["WANDB_MODE"] = "disabled"
+
+    try:
+        if wandb.run is not None:
+            wandb.finish()
+    except Exception:
+        logger.exception("Failed to finish partially initialized W&B run after disabling it.")
+
+
 def _is_offline_mode(args) -> bool:
     """Detect whether W&B should run in offline mode.
 
@@ -79,6 +97,62 @@ def init_wandb_primary(args):
     args.wandb_run_id = wandb.run.id
 
 
+def reinit_wandb_primary_with_open_metrics(args, router_addr):
+    """Re-initialize the primary W&B run with open metrics endpoints.
+
+    The primary wandb init happens before rollout servers start (to obtain
+    ``wandb_run_id`` for secondary processes).  This function is called
+    *after* servers are up so the router address is available for scraping
+    SGLang Prometheus metrics via the primary process's stats monitor.
+    """
+    if not args.use_wandb or _is_offline_mode(args):
+        return
+    if getattr(args, "wandb_mode", None) == "disabled":
+        return
+    if router_addr is None:
+        return
+    wandb_run_id = getattr(args, "wandb_run_id", None)
+    if wandb_run_id is None:
+        return
+
+    import sglang_router
+
+    if "slime" not in sglang_router.__version__:
+        logger.warning(
+            "Only customized sglang_router from https://github.com/zhuzilin/sgl-router supports uploading metrics."
+        )
+        return
+
+    logger.info(f"Re-initializing primary W&B with SGLang metrics at {router_addr}.")
+
+    wandb.finish()
+
+    init_kwargs = {
+        "id": wandb_run_id,
+        "entity": args.wandb_team,
+        "project": args.wandb_project,
+        "resume": "allow",
+        "reinit": True,
+        "settings": wandb.Settings(
+            mode="shared",
+            x_primary=True,
+            x_stats_open_metrics_endpoints={
+                "sgl_engine": f"{router_addr}/engine_metrics",
+            },
+            x_stats_open_metrics_filters={
+                "sgl_engine.*": {},
+            },
+        ),
+    }
+
+    if args.wandb_dir:
+        os.makedirs(args.wandb_dir, exist_ok=True)
+        init_kwargs["dir"] = args.wandb_dir
+
+    wandb.init(**init_kwargs)
+    _init_wandb_common()
+
+
 def _compute_config_for_logging(args):
     output = deepcopy(args.__dict__)
 
@@ -92,59 +166,56 @@ def _compute_config_for_logging(args):
 
 
 # https://docs.wandb.ai/guides/track/log/distributed-training/#track-all-processes-to-a-single-run
-def init_wandb_secondary(args, router_addr=None):
+def init_wandb_secondary(args):
     wandb_run_id = getattr(args, "wandb_run_id", None)
     if wandb_run_id is None:
         return
 
-    # Set W&B mode if specified (same as primary)
-    if args.wandb_mode:
-        os.environ["WANDB_MODE"] = args.wandb_mode
+    try:
+        # Set W&B mode if specified (same as primary)
+        if args.wandb_mode:
+            os.environ["WANDB_MODE"] = args.wandb_mode
 
-    offline = _is_offline_mode(args)
+        offline = _is_offline_mode(args)
 
-    if (not offline) and args.wandb_key is not None:
-        wandb.login(key=args.wandb_key, host=args.wandb_host)
+        if (not offline) and args.wandb_key is not None:
+            wandb.login(key=args.wandb_key, host=args.wandb_host)
 
-    # Configure settings based on offline/online mode
-    if offline:
-        settings_kwargs = dict(mode="offline")
-    else:
-        settings_kwargs = dict(
-            mode="shared",
-            x_primary=False,
-            x_update_finish_state=False,
+        # Configure settings based on offline/online mode
+        if offline:
+            settings_kwargs = dict(mode="offline")
+        else:
+            settings_kwargs = dict(
+                mode="shared",
+                x_primary=False,
+                x_update_finish_state=False,
+            )
+
+        init_kwargs = {
+            "id": wandb_run_id,
+            "entity": args.wandb_team,
+            "project": args.wandb_project,
+            "config": args.__dict__,
+            "resume": "allow",
+            "reinit": True,
+            "settings": wandb.Settings(**settings_kwargs),
+        }
+
+        # Add custom directory if specified
+        if args.wandb_dir:
+            os.makedirs(args.wandb_dir, exist_ok=True)
+            init_kwargs["dir"] = args.wandb_dir
+
+        wandb.init(**init_kwargs)
+        _init_wandb_common()
+    except Exception as exc:
+        # Secondary/shared-process W&B failures are non-critical for training.
+        # Most commonly these are transient network/resume-status issues.
+        _disable_wandb_for_current_process(
+            args,
+            reason="secondary W&B initialization failed; training will continue without per-process W&B logging",
+            exc=exc,
         )
-
-    if getattr(args, "sglang_enable_metrics", False) and router_addr is not None:
-        logger.info(f"Forward SGLang metrics at {router_addr} to WandB.")
-        settings_kwargs |= dict(
-            x_stats_open_metrics_endpoints={
-                "sgl_engine": f"{router_addr}/engine_metrics",
-            },
-            x_stats_open_metrics_filters={
-                "sgl_engine.*": {},
-            },
-        )
-
-    init_kwargs = {
-        "id": wandb_run_id,
-        "entity": args.wandb_team,
-        "project": args.wandb_project,
-        "config": args.__dict__,
-        "resume": "allow",
-        "reinit": True,
-        "settings": wandb.Settings(**settings_kwargs),
-    }
-
-    # Add custom directory if specified
-    if args.wandb_dir:
-        os.makedirs(args.wandb_dir, exist_ok=True)
-        init_kwargs["dir"] = args.wandb_dir
-
-    wandb.init(**init_kwargs)
-
-    _init_wandb_common()
 
 
 def _init_wandb_common():

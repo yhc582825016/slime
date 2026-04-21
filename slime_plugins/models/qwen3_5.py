@@ -1,7 +1,4 @@
 import copy
-import json
-import os
-import logging
 
 import torch
 import torch.nn as nn
@@ -12,34 +9,13 @@ from megatron.core.transformer.transformer_block import get_num_layers_to_build
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 from transformers.activations import ACT2FN
 
-
-def _load_hf_config(checkpoint_path):
-    """Load HF config, handling cases where transformers doesn't know the model type."""
-    try:
-        from transformers import AutoConfig
-
-        return AutoConfig.from_pretrained(checkpoint_path, trust_remote_code=True)
-    except (ValueError, KeyError):
-        # Fallback: load config.json directly as a SimpleNamespace
-        config_path = os.path.join(checkpoint_path, "config.json")
-        with open(config_path) as f:
-            config_dict = json.load(f)
-        # If there's a text_config, also make it a namespace
-        ns = type("HFConfig", (), config_dict)()
-        if "text_config" in config_dict:
-            ns.text_config = type("TextConfig", (), config_dict["text_config"])()
-        return ns
-
-
 try:
     from fla.modules import FusedRMSNormGated, ShortConvolution
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 except ImportError:
     pass
 
-from .hf_attention import HuggingfaceAttention
-
-logger = logging.getLogger(__name__)
+from .hf_attention import HuggingfaceAttention, _load_hf_config
 
 
 def _get_text_config(hf_config):
@@ -47,42 +23,6 @@ def _get_text_config(hf_config):
     if hasattr(hf_config, "text_config"):
         return hf_config.text_config
     return hf_config
-
-
-def _resolve_layer_types(text_config):
-    """Resolve per-layer attention types with backward-compatible fallbacks.
-
-    Preferred source is `text_config.layer_types`.
-    Some transformers/qwen3.5 config variants do not expose this attribute but
-    provide `full_attention_interval` and `num_hidden_layers`, from which we can
-    reconstruct the expected linear/full pattern.
-    """
-    layer_types = getattr(text_config, "layer_types", None)
-    if layer_types:
-        return list(layer_types)
-
-    num_layers = int(getattr(text_config, "num_hidden_layers"))
-    full_interval = int(getattr(text_config, "full_attention_interval", 0) or 0)
-
-    if full_interval <= 0:
-        logger.warning(
-            "Qwen3.5 text_config has no layer_types and no valid full_attention_interval; "
-            "fallback to all full_attention layers."
-        )
-        return ["full_attention"] * num_layers
-
-    reconstructed = []
-    for i in range(num_layers):
-        if (i + 1) % full_interval == 0:
-            reconstructed.append("full_attention")
-        else:
-            reconstructed.append("linear_attention")
-    logger.info(
-        "Reconstructed qwen3.5 layer_types from full_attention_interval=%s, num_hidden_layers=%s",
-        full_interval,
-        num_layers,
-    )
-    return reconstructed
 
 
 # Adapted from Qwen3NextGatedDeltaNet but with separate in_proj_qkv and in_proj_z
@@ -264,10 +204,17 @@ def get_qwen3_5_spec(args, config, vp_stage):
 
     hf_config = _load_hf_config(args.hf_checkpoint)
     text_config = _get_text_config(hf_config)
-    layer_types = _resolve_layer_types(text_config)
+
+    # Compute layer_types if the config class doesn't expose it
+    if not hasattr(text_config, "layer_types"):
+        interval = getattr(text_config, "full_attention_interval", 4)
+        n = text_config.num_hidden_layers
+        text_config.layer_types = [
+            "full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(n)
+        ]
 
     for layer_id in range(num_layers_to_build):
-        if layer_types[layer_id + offset] == "linear_attention":
+        if text_config.layer_types[layer_id + offset] == "linear_attention":
             layer_specs = copy.deepcopy(transformer_layer_spec.layer_specs[layer_id])
             layer_specs.submodules.self_attention = ModuleSpec(
                 module=Attention,

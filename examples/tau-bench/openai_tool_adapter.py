@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,7 +38,7 @@ class OpenAICompatibleToolCallAdapter:
     and provides OpenAI format output interface.
     """
 
-    def __init__(self, tools_info: list[dict[str, Any]], parser_type: str = "qwen25"):
+    def __init__(self, tools_info: list[dict[str, Any]], parser_type: str = "qwen3_coder"):
         """
         Initialize adapter
 
@@ -160,7 +161,7 @@ class OpenAICompatibleToolCallAdapter:
 
 # Usage examples and factory functions
 def create_openai_adapter(
-    tools_info: list[dict[str, Any]], parser_type: str = "qwen25"
+    tools_info: list[dict[str, Any]], parser_type: str | None = None
 ) -> OpenAICompatibleToolCallAdapter:
     """
     Factory function to create OpenAI compatible tool call adapter
@@ -172,4 +173,5 @@ def create_openai_adapter(
     Returns:
         Configured adapter instance
     """
-    return OpenAICompatibleToolCallAdapter(tools_info, parser_type)
+    resolved_parser_type = parser_type or os.environ.get("TAU_TOOL_CALL_PARSER", "qwen3_coder")
+    return OpenAICompatibleToolCallAdapter(tools_info, resolved_parser_type)

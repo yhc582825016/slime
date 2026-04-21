@@ -267,7 +267,7 @@ def _update_multimodal_state(
 
 def _contains_tool_call_markup(text: str) -> bool:
     text = text or ""
-    return "<tool_call>" in text and "</tool_call>" in text
+    return any(marker in text for marker in ("<tool_call>", "</tool_call>", "<function=", "</function>", "<parameter="))
 
 
 def _mark_stop_reason(sample: Sample, reason: str, **details: Any) -> None:
@@ -276,6 +276,31 @@ def _mark_stop_reason(sample: Sample, reason: str, **details: Any) -> None:
     sample.metadata["stop_reason"] = reason
     for key, value in details.items():
         sample.metadata[f"stop_{key}"] = value
+
+
+def _record_bfcl_response_step(sample: Sample, response_text: str, step_info: dict[str, Any] | None) -> None:
+    metadata = sample.metadata if isinstance(sample.metadata, dict) else None
+    if not metadata or not metadata.get("bfcl_eval_mode"):
+        return
+
+    trace = metadata.setdefault("bfcl_rollout_trace", {"turns": [[]], "current_turn": 0})
+    turns = trace.setdefault("turns", [[]])
+    current_turn = int(trace.get("current_turn", 0))
+    while len(turns) <= current_turn:
+        turns.append([])
+
+    turns[current_turn].append(
+        {
+            "response_text": response_text,
+            "step_info": dict(step_info or {}),
+        }
+    )
+
+    if step_info and step_info.get("advanced_turn"):
+        next_turn = current_turn + 1
+        trace["current_turn"] = next_turn
+        while len(turns) <= next_turn:
+            turns.append([])
 
 
 def _should_stop_on_finish(sample: Sample, finish_type: str, response_text: str) -> str | None:
@@ -380,9 +405,8 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
                 )
                 break
 
-            obs_prompt_ids, obs_image_data, obs_multimodal_inputs, obs_multimodal_train_inputs, done = (
-                _process_env_step(env, response_text, state.tokenizer, state.processor, args, sample.metadata)
-            )
+            env_observation, done, step_info = env.step(response_text)
+            _record_bfcl_response_step(sample, response_text, step_info)
             if done:
                 sample.status = Sample.Status.COMPLETED
                 _mark_stop_reason(
@@ -395,6 +419,18 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
                     status=str(sample.status),
                 )
                 break
+
+            next_user_message = env.format_observation(env_observation)
+            obs_prompt_ids, obs_image_data, obs_multimodal_inputs, obs_multimodal_train_inputs = (
+                _encode_observation_for_generation(
+                state.tokenizer,
+                state.processor,
+                next_user_message,
+                sample.metadata,
+                args.apply_chat_template,
+                args.apply_chat_template_kwargs,
+                )
+            )
 
             obs_log_probs = [0.0] * len(obs_prompt_ids)
             _append_to_sample(sample, response_tokens, obs_prompt_ids, obs_log_probs, loss_mask_val=0)

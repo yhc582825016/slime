@@ -45,23 +45,23 @@ def _normalize_tool_schemas(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)]
 
 
-def _render_system_prompt(tool_schemas: list[dict[str, Any]]) -> str:
-    tool_block = "\n".join(_json_dumps(tool) for tool in tool_schemas)
+def _render_system_prompt() -> str:
     return (
         "You are a helpful tool-using assistant.\n\n"
         "Solve the user's task by reasoning step by step.\n"
-        "When you need tools, output one or more tool calls in the XML format below:\n"
+        "When you need a tool, call it in the Qwen XML function-call format below:\n"
         "<tool_call>\n"
-        '{"name": "<function-name>", "arguments": {"arg": "value"}}\n'
-        "</tool_call>\n\n"
+        "<function=function_name>\n"
+        "<parameter=arg_name>\n"
+        "value\n"
+        "</parameter>\n"
+        "</function>\n"
+        "</tool_call>\n"
+        "You may include brief reasoning before the tool call, but not after it.\n\n"
         "After each tool call, you will receive the execution result inside <tool_response></tool_response>.\n"
         "When you have enough information, stop calling tools and provide the final answer as "
         "\\boxed{your final answer}.\n"
-        "Do not put the final answer anywhere except inside the last box.\n\n"
-        "Available tools are provided below:\n"
-        "<tools>\n"
-        f"{tool_block}\n"
-        "</tools>"
+        "Do not put the final answer anywhere except inside the last box."
     )
 
 
@@ -76,7 +76,7 @@ def _convert_row(row: dict[str, Any], row_idx: int) -> dict[str, Any]:
     question = str(row.get("question") or "")
 
     prompt = [
-        {"role": "system", "content": _render_system_prompt(tool_schemas)},
+        {"role": "system", "content": _render_system_prompt()},
         {"role": "user", "content": question},
     ]
 
@@ -90,8 +90,11 @@ def _convert_row(row: dict[str, Any], row_idx: int) -> dict[str, Any]:
         "question": question,
     }
 
+    # Keep tools at the top level so `--tool-key tools` can feed them into
+    # Qwen's native chat template on the very first rollout turn.
     return {
         "prompt": prompt,
+        "tools": tool_schemas,
         "label": {
             "ground_truth": ground_truth,
             "style": reward_model.get("style", "rule"),

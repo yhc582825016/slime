@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -15,6 +17,19 @@ from slime.utils.http_utils import post
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
+
+_TOOL_CALL_PARSER = os.environ.get("TAU_TOOL_CALL_PARSER", "qwen3_coder")
+
+
+_USER_SIM_MAX_CONCURRENCY = int(os.environ.get("TAU_USER_MAX_CONCURRENCY", "16"))
+_user_sim_semaphore: asyncio.Semaphore | None = None
+
+
+def get_user_sim_semaphore() -> asyncio.Semaphore:
+    global _user_sim_semaphore
+    if _user_sim_semaphore is None:
+        _user_sim_semaphore = asyncio.Semaphore(_USER_SIM_MAX_CONCURRENCY)
+    return _user_sim_semaphore
 
 
 class Status(Enum):
@@ -123,7 +138,14 @@ class TrainableAgentMixin:
         Returns:
             Environment step result
         """
-        return env.step(action)
+        if action.name != RESPOND_ACTION_NAME:
+            return env.step(action)
+
+        # tau-bench user simulation currently uses synchronous LiteLLM calls.
+        # Run the environment step in a worker thread so concurrent trajectories
+        # can keep making progress instead of blocking the rollout event loop.
+        async with get_user_sim_semaphore():
+            return await asyncio.to_thread(env.step, action)
 
     def _initialize_environment(self, env, task_index: int | None) -> tuple[str, dict[str, Any]]:
         """
@@ -179,7 +201,7 @@ class TrainableAgentMixin:
         rollout_args: dict[str, Any],
         sampling_params: dict[str, Any],
         task_index: int | None = None,
-        max_num_steps: int = 30,
+        max_num_steps: int = 32,
     ) -> InteractionResult:
         """
         Execute async agent-environment interaction for training.
@@ -228,7 +250,21 @@ class TrainableAgentMixin:
             payload = {"text": text_input, "sampling_params": sampling_params}
 
             # Send request to sglang server
+            logger.info(
+                "Agent rollout request | task_index=%s turn=%s url=%s input_chars=%s max_new_tokens=%s",
+                task_index,
+                len([m for m in messages if m["role"] == "assistant"]) + 1,
+                url,
+                len(text_input),
+                sampling_params.get("max_new_tokens"),
+            )
             output = await self._call_llm(url, payload)
+            logger.info(
+                "Agent rollout response | task_index=%s finish_reason=%s output_chars=%s",
+                task_index,
+                output.get("meta_info", {}).get("finish_reason"),
+                len(output.get("text", "")),
+            )
 
             # Check for abort
             if output["meta_info"]["finish_reason"]["type"] == "abort":
@@ -241,6 +277,7 @@ class TrainableAgentMixin:
             # Remove end of conversation token if present
             if response.endswith("<|im_end|>"):
                 response = response[:-10]
+            logger.info("Agent raw output | task_index=%s content=%r", task_index, response)
 
             # Parse tool calls using OpenAI adapter
             logger.debug(f"Using OpenAI adapter to parse response: {response[:100]}...")
@@ -295,6 +332,14 @@ class TrainableAgentMixin:
                 )
 
             logger.debug(f"Environment response: reward={env_response.reward}, " f"done={env_response.done}")
+            logger.info(
+                "Environment step result | task_index=%s action=%s done=%s reward=%s observation=%r",
+                task_index,
+                action.name,
+                env_response.done,
+                env_response.reward,
+                env_response.observation,
+            )
 
             # Update message history based on action type
             if action.name != RESPOND_ACTION_NAME:
@@ -450,7 +495,7 @@ class TrainableToolCallingAgent(ToolCallingAgent, TrainableAgentMixin):
             "top_k": 50,
         }
         # Initialize OpenAI adapter
-        self.openai_adapter = create_openai_adapter(tools_info=self.tools_info, parser_type="qwen25")
+        self.openai_adapter = create_openai_adapter(tools_info=self.tools_info, parser_type=_TOOL_CALL_PARSER)
 
 
 def agent_factory(
