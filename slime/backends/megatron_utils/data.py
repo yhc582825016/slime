@@ -292,10 +292,14 @@ def _get_capped_partitions(seqlen_list: Sequence[int], num_partitions: int, max_
 
     Uses the same first-fit algorithm as ``get_minimum_num_micro_batch_size``
     so that when ``num_partitions >= get_minimum_num_micro_batch_size(...)``,
-    every partition is guaranteed to stay within *max_tokens*.
+    every partition is guaranteed to stay within *max_tokens* unless an
+    individual sample itself already exceeds *max_tokens*. In that case we
+    preserve the existing dynamic-batching contract and let the sample occupy
+    its own partition.
     """
     partitions: list[list[int]] = [[] for _ in range(num_partitions)]
     sums = [0] * num_partitions
+    oversize_samples: list[tuple[int, int]] = []
 
     for idx, length in enumerate(seqlen_list):
         for i in range(num_partitions):
@@ -303,8 +307,25 @@ def _get_capped_partitions(seqlen_list: Sequence[int], num_partitions: int, max_
                 partitions[i].append(idx)
                 sums[i] += length
                 break
+            if not partitions[i] and length > max_tokens:
+                partitions[i].append(idx)
+                sums[i] = length
+                oversize_samples.append((idx, length))
+                break
         else:
-            raise AssertionError("This should never happen.")
+            raise AssertionError(
+                "Unable to partition samples within the token cap. "
+                f"lengths={list(seqlen_list)}, num_partitions={num_partitions}, max_tokens={max_tokens}"
+            )
+
+    if oversize_samples:
+        logger.warning(
+            "Found %d sample(s) longer than max_tokens_per_gpu * cp_size=%d; "
+            "assigning each to its own micro-batch: %s",
+            len(oversize_samples),
+            max_tokens,
+            oversize_samples,
+        )
 
     return [sorted(p) for p in partitions]
 

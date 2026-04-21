@@ -267,7 +267,7 @@ def _update_multimodal_state(
 
 def _contains_tool_call_markup(text: str) -> bool:
     text = text or ""
-    return "<tool_call>" in text and "</tool_call>" in text
+    return any(marker in text for marker in ("<tool_call>", "</tool_call>", "<function=", "</function>", "<parameter="))
 
 
 def _mark_stop_reason(sample: Sample, reason: str, **details: Any) -> None:

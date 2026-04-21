@@ -18,21 +18,41 @@ from slime.utils.types import Sample
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
+TAU_MAX_NUM_STEPS = int(os.environ.get("TAU_MAX_NUM_STEPS", "32"))
+
+# Default LiteLLM/OpenAI-compatible user simulator settings.
+#
+# These defaults are aligned with a local LiteLLM proxy:
+#   http://127.0.0.1:4000/v1
+# serving model:
+#   Qwen3.5-4B
+#
+# Override them with environment variables when needed.
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:4000/v1")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "sk-local")
+
+# Export a few common aliases because the downstream tau-bench / litellm stack
+# may read different names depending on the provider implementation.
+os.environ.setdefault("OPENAI_BASE_URL", OPENAI_BASE_URL)
+os.environ.setdefault("OPENAI_API_BASE", OPENAI_BASE_URL)
+os.environ.setdefault("OPENAI_API_KEY", OPENAI_API_KEY)
+os.environ.setdefault("LITELLM_API_BASE", OPENAI_BASE_URL)
+os.environ.setdefault("LITELLM_API_KEY", OPENAI_API_KEY)
 
 # Tau-bench configuration
 TAU_CONFIGS = {
     "env": "retail",  # Select between ["retail", "airline"]
     "agent": "tool-calling",  # Select between ["tool-calling", "act", "react", "few-shot"]
-    "user_model": "gemini-2.5-flash-lite",  # Cheap Model for user simulator
-    "task_split": "train",  # Select between ["train", "test", "dev"] for retail
-    "user_strategy": "llm",  # Select between ["llm", "react", "verify", "reflection"]
+    "user_model": os.environ.get("TAU_USER_MODEL", "Qwen3.5-4B"),
+    "task_split": os.environ.get("TAU_TASK_SPLIT", "train"),  # Select between ["train", "test", "dev"] for retail
+    "user_strategy": os.environ.get(
+        "TAU_USER_STRATEGY", "llm"
+    ),  # Select between ["llm", "react", "verify", "reflection"]
     "model_provider": "auto_router",  # Unused, required
     "model": "qwen3-4b",  # Unused, required
-    "user_model_provider": "gemini",
+    # Assumption: the litellm-retry branch routes local LiteLLM via an OpenAI-compatible provider.
+    "user_model_provider": os.environ.get("TAU_USER_MODEL_PROVIDER", "openai"),
 }
-# Replace with your actual API key for user sim
-GEMINI_API_KEY = "NONE"
-os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
 tau_config = RunConfig(**TAU_CONFIGS)
 
 
@@ -144,7 +164,13 @@ async def generate(args: dict[str, Any], sample: Sample, sampling_params: dict) 
 
     # Execute agent-environment interaction
     # Note: The sample.prompt field contains the task index for repeatability
-    interaction_result = await agent.asolve(env, agent.rollout_args, agent.sampling_params, task_index)
+    interaction_result = await agent.asolve(
+        env,
+        agent.rollout_args,
+        agent.sampling_params,
+        task_index,
+        max_num_steps=TAU_MAX_NUM_STEPS,
+    )
 
     # Convert to slime Sample format
     result_sample = res_to_sample(interaction_result, task_index)

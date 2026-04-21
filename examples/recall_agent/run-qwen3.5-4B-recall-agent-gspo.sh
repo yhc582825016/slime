@@ -51,12 +51,17 @@ EVAL_DATA_NAME="${EVAL_DATA_NAME:-recall_agent_eval}"
 N_SAMPLES_PER_EVAL_PROMPT="${N_SAMPLES_PER_EVAL_PROMPT:-1}"
 EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-24000}"
 
-USE_WANDB="${USE_WANDB:-1}"
+USE_WANDB="${USE_WANDB:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime}"
 WANDB_GROUP="${WANDB_GROUP:-recall_agent_qwen3.5_4b}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-qwen3.5-4B-recall-agent-gspo}"
 WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-04b01529fb630482bdf2f363456479f197ac5694}}"
 WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.bandw.top}"
+
+USE_TENSORBOARD="${USE_TENSORBOARD:-1}"
+TB_PROJECT_NAME="${TB_PROJECT_NAME:-slime}"
+TB_EXPERIMENT_NAME="${TB_EXPERIMENT_NAME:-${WANDB_RUN_NAME}}"
+TENSORBOARD_DIR="${TENSORBOARD_DIR:-$(dirname -- "${SAVE_PATH}")/tensorboard/${TB_PROJECT_NAME}/${TB_EXPERIMENT_NAME}}"
 
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
@@ -112,6 +117,7 @@ ROLLOUT_ARGS=(
   --input-key prompt
   --label-key label
   --metadata-key metadata
+  --tool-key tools
   --apply-chat-template
   --rollout-shuffle
   --num-rollout "${NUM_ROLLOUT}"
@@ -211,6 +217,17 @@ if [[ "${USE_WANDB}" == "1" ]]; then
   fi
 fi
 
+TENSORBOARD_ARGS=()
+if [[ "${USE_TENSORBOARD}" == "1" ]]; then
+  mkdir -p "${TENSORBOARD_DIR}"
+  export TENSORBOARD_DIR
+  TENSORBOARD_ARGS+=(
+    --use-tensorboard
+    --tb-project-name "${TB_PROJECT_NAME}"
+    --tb-experiment-name "${TB_EXPERIMENT_NAME}"
+  )
+fi
+
 OFFLOAD_ARGS+=(--offload)
 
 echo "[step] restarting ray..."
@@ -234,6 +251,7 @@ RUNTIME_ENV_JSON="{
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"TORCHINDUCTOR_FORCE_DISABLE_CACHES\": \"${TORCHINDUCTOR_FORCE_DISABLE_CACHES}\",
     \"CUDA_LAUNCH_BLOCKING\": \"${CUDA_LAUNCH_BLOCKING}\",
+    \"TENSORBOARD_DIR\": \"${TENSORBOARD_DIR}\",
     \"WANDB_API_KEY\": \"${WANDB_API_KEY:-}\",
     \"WANDB_BASE_URL\": \"${WANDB_BASE_URL}\"${RUNTIME_CUDA_JSON}
   }
@@ -254,9 +272,13 @@ nohup ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
   "${OPTIMIZER_ARGS[@]}" \
   "${GSPO_ARGS[@]}" \
   "${WANDB_ARGS[@]}" \
+  "${TENSORBOARD_ARGS[@]}" \
   "${PERF_ARGS[@]}" \
   "${SGLANG_ARGS[@]}" \
   "${MISC_ARGS[@]}" \
   "${CUSTOM_ARGS[@]}" \
   >> "${RECALL_AGENT_JOB_LOG}" 2>&1 &
 echo "[info] ray job submit pid: $!  (output: ${RECALL_AGENT_JOB_LOG})"
+if [[ "${USE_TENSORBOARD}" == "1" ]]; then
+  echo "[info] tensorboard dir: ${TENSORBOARD_DIR}"
+fi

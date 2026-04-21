@@ -76,13 +76,18 @@ def _flatten_turn_text(turns: list[list[dict[str, Any]]]) -> str:
 
 
 def _render_system_prompt(initial_tools: list[dict[str, Any]]) -> str:
+    del initial_tools
     return (
         "You are a helpful tool-using assistant solving a multi-turn function-calling task.\n\n"
         "Rules:\n"
         "1. For the current user turn, reason step by step and call tools when needed.\n"
-        "2. Emit tool calls in the exact XML format below:\n"
+        "2. Emit tool calls in the Qwen XML function-call format below:\n"
         "<tool_call>\n"
-        '{"name": "<function-name>", "arguments": {"arg": "value"}}\n'
+        "<function=function_name>\n"
+        "<parameter=arg_name>\n"
+        "value\n"
+        "</parameter>\n"
+        "</function>\n"
         "</tool_call>\n"
         "3. After each tool call, you will receive execution results inside <tool_response></tool_response>.\n"
         "4. When the current user turn is complete, stop calling tools and wait. The environment may provide the next user turn.\n"
@@ -90,9 +95,8 @@ def _render_system_prompt(initial_tools: list[dict[str, Any]]) -> str:
         "6. After the final user turn is complete, output the full ordered list of tool calls across all turns in "
         '\\boxed{["func1(arg=...)", "func2(arg=...)", ...]}.\n'
         "7. Each item in the final boxed list must be a Python-style function-call string.\n"
-        "8. Do not put the final answer anywhere except inside the last box.\n\n"
-        "Available tools for the current turn are provided below:\n"
-        f"{_render_tool_block(initial_tools)}"
+        "8. Do not put the final answer anywhere except inside the last box.\n"
+        "9. You may write brief reasoning before a tool call, but never after it."
     )
 
 
@@ -219,8 +223,11 @@ def _convert_entry(
     prompt = [{"role": "system", "content": _render_system_prompt(initial_tools)}]
     prompt.extend(first_turn)
 
+    # Keep initial tools at the top level so the first turn also uses the
+    # tokenizer's native Qwen tool-calling template.
     return {
         "prompt": prompt,
+        "tools": initial_tools,
         "label": {
             "ground_truth": [json.dumps(flattened_ground_truth, ensure_ascii=False)],
             "style": "rule",
@@ -233,7 +240,7 @@ def _convert_entry(
             "question": _flatten_turn_text(conversation_turns),
             "env": env_code,
             "tool_schemas": initial_tools,
-            "tools": [],
+            "tools": initial_tools,
             "conversation_turns": conversation_turns,
             "additional_tools_by_turn": additional_tools_by_turn,
             "expected_tool_sequence": flattened_ground_truth,

@@ -7,6 +7,24 @@ import wandb
 logger = logging.getLogger(__name__)
 
 
+def _disable_wandb_for_current_process(args, reason: str, exc: Exception | None = None) -> None:
+    message = f"Disabling W&B in current process: {reason}"
+    if exc is None:
+        logger.warning(message)
+    else:
+        logger.warning("%s (%s: %s)", message, type(exc).__name__, exc)
+
+    args.use_wandb = False
+    args.wandb_mode = "disabled"
+    os.environ["WANDB_MODE"] = "disabled"
+
+    try:
+        if wandb.run is not None:
+            wandb.finish()
+    except Exception:
+        logger.exception("Failed to finish partially initialized W&B run after disabling it.")
+
+
 def _is_offline_mode(args) -> bool:
     """Detect whether W&B should run in offline mode.
 
@@ -153,43 +171,51 @@ def init_wandb_secondary(args):
     if wandb_run_id is None:
         return
 
-    # Set W&B mode if specified (same as primary)
-    if args.wandb_mode:
-        os.environ["WANDB_MODE"] = args.wandb_mode
+    try:
+        # Set W&B mode if specified (same as primary)
+        if args.wandb_mode:
+            os.environ["WANDB_MODE"] = args.wandb_mode
 
-    offline = _is_offline_mode(args)
+        offline = _is_offline_mode(args)
 
-    if (not offline) and args.wandb_key is not None:
-        wandb.login(key=args.wandb_key, host=args.wandb_host)
+        if (not offline) and args.wandb_key is not None:
+            wandb.login(key=args.wandb_key, host=args.wandb_host)
 
-    # Configure settings based on offline/online mode
-    if offline:
-        settings_kwargs = dict(mode="offline")
-    else:
-        settings_kwargs = dict(
-            mode="shared",
-            x_primary=False,
-            x_update_finish_state=False,
+        # Configure settings based on offline/online mode
+        if offline:
+            settings_kwargs = dict(mode="offline")
+        else:
+            settings_kwargs = dict(
+                mode="shared",
+                x_primary=False,
+                x_update_finish_state=False,
+            )
+
+        init_kwargs = {
+            "id": wandb_run_id,
+            "entity": args.wandb_team,
+            "project": args.wandb_project,
+            "config": args.__dict__,
+            "resume": "allow",
+            "reinit": True,
+            "settings": wandb.Settings(**settings_kwargs),
+        }
+
+        # Add custom directory if specified
+        if args.wandb_dir:
+            os.makedirs(args.wandb_dir, exist_ok=True)
+            init_kwargs["dir"] = args.wandb_dir
+
+        wandb.init(**init_kwargs)
+        _init_wandb_common()
+    except Exception as exc:
+        # Secondary/shared-process W&B failures are non-critical for training.
+        # Most commonly these are transient network/resume-status issues.
+        _disable_wandb_for_current_process(
+            args,
+            reason="secondary W&B initialization failed; training will continue without per-process W&B logging",
+            exc=exc,
         )
-
-    init_kwargs = {
-        "id": wandb_run_id,
-        "entity": args.wandb_team,
-        "project": args.wandb_project,
-        "config": args.__dict__,
-        "resume": "allow",
-        "reinit": True,
-        "settings": wandb.Settings(**settings_kwargs),
-    }
-
-    # Add custom directory if specified
-    if args.wandb_dir:
-        os.makedirs(args.wandb_dir, exist_ok=True)
-        init_kwargs["dir"] = args.wandb_dir
-
-    wandb.init(**init_kwargs)
-
-    _init_wandb_common()
 
 
 def _init_wandb_common():

@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 TOOL_CALL_JSON_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 FUNCTION_BLOCK_RE = re.compile(r"(<function\s*=\s*.*?</function>)", re.DOTALL)
-FUNCTION_TAG_RE = re.compile(r"<function\s*=\s*([a-zA-Z0-9_\-\.]+)\s*>", re.DOTALL)
-PARAM_TAG_RE = re.compile(r"<parameter\s*=\s*([a-zA-Z0-9_\-\.]+)\s*>(.*?)</parameter>", re.DOTALL)
+FUNCTION_TAG_RE = re.compile(r"<function\s*=\s*['\"]?([a-zA-Z0-9_\-\.]+)['\"]?\s*>", re.DOTALL)
+PARAM_TAG_RE = re.compile(r"<parameter\s*=\s*['\"]?([a-zA-Z0-9_\-\.]+)['\"]?\s*>(.*?)</parameter>", re.DOTALL)
 EOS_MARKERS = ("<|im_end|>", "<|endoftext|>", "</s>")
 BOX_PREFIXES = ("\\boxed{", "boxed{")
 BFCL_ADDITIONAL_FUNCTION_PROMPT = (
@@ -150,13 +150,21 @@ def _normalize_tool_payload(payload: Any) -> dict[str, Any] | None:
 
     name = payload.get("name")
     arguments = payload.get("arguments")
+    if arguments is None:
+        arguments = payload.get("parameters")
 
     # Some models emit OpenAI-style function wrapper:
     # {"function": {"name": "...", "arguments": {...}}}
     fn_payload = payload.get("function")
-    if (not name) and isinstance(fn_payload, dict):
-        name = fn_payload.get("name")
-        arguments = fn_payload.get("arguments")
+    if isinstance(fn_payload, dict):
+        if not name:
+            name = fn_payload.get("name")
+        if arguments is None:
+            arguments = fn_payload.get("arguments")
+        if arguments is None:
+            arguments = fn_payload.get("parameters")
+    elif (not name) and isinstance(fn_payload, str):
+        name = fn_payload
 
     if not name:
         return None
@@ -244,7 +252,16 @@ class RecallAgentEnv(BaseInteractionEnv):
         tool_calls: list[dict[str, Any]] = []
         blocks = TOOL_CALL_BLOCK_RE.findall(text)
         for block in blocks:
-            found_in_block = False
+            block = block.strip()
+            if not block:
+                continue
+
+            if "<function" in block:
+                payload = _extract_from_function_parameter_markup(block)
+                if payload is not None:
+                    tool_calls.append(payload)
+                    continue
+
             for raw_json in _extract_json_candidates(block):
                 try:
                     payload = _json_loads(raw_json)
@@ -253,10 +270,13 @@ class RecallAgentEnv(BaseInteractionEnv):
                 normalized = _normalize_tool_payload(payload)
                 if normalized is not None:
                     tool_calls.append(normalized)
-                    found_in_block = True
                     break
-            if found_in_block:
-                continue
+
+        if tool_calls:
+            return tool_calls
+
+        fn_blocks = FUNCTION_BLOCK_RE.findall(text)
+        for block in fn_blocks:
             payload = _extract_from_function_parameter_markup(block)
             if payload is not None:
                 tool_calls.append(payload)
@@ -276,12 +296,6 @@ class RecallAgentEnv(BaseInteractionEnv):
             if normalized is not None:
                 tool_calls.append(normalized)
 
-        fn_blocks = FUNCTION_BLOCK_RE.findall(text)
-        for block in fn_blocks:
-            payload = _extract_from_function_parameter_markup(block)
-            if payload is not None:
-                tool_calls.append(payload)
-
         return tool_calls
 
     def _has_terminal_eos(self, text: str) -> bool:
@@ -290,7 +304,7 @@ class RecallAgentEnv(BaseInteractionEnv):
 
     def _has_final_boxed_answer(self, text: str) -> bool:
         text = text or ""
-        if "<tool_call>" in text:
+        if self._has_tool_call_markup(text):
             # If model still emits tool markup, treat it as an ongoing interaction turn.
             return False
         for prefix in BOX_PREFIXES:
@@ -307,7 +321,7 @@ class RecallAgentEnv(BaseInteractionEnv):
 
     def _has_tool_call_markup(self, text: str) -> bool:
         text = text or ""
-        return "<tool_call>" in text or "</tool_call>" in text
+        return any(marker in text for marker in ("<tool_call>", "</tool_call>", "<function=", "</function>", "<parameter="))
 
     def _is_tool_allowed(self, tool_name: str) -> bool:
         if tool_name in self.supported_tools:
@@ -412,7 +426,7 @@ class RecallAgentEnv(BaseInteractionEnv):
                     "obs_str": (
                         "<tool_response>Error: malformed tool call payload.</tool_response>\n"
                         "You emitted tool_call markup but no valid callable payload was parsed.\n"
-                        "Please output a valid JSON tool call payload.\n"
+                        "Please output a valid Qwen XML tool call payload.\n"
                         f"{self._turn_hint()}"
                     ),
                     "role": "tool",

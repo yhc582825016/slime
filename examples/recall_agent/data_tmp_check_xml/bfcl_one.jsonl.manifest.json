@@ -1,0 +1,12 @@
+{
+  "bfcl_root": "/dev/shm/ye/gorilla/berkeley-function-call-leaderboard",
+  "sample_size": 1,
+  "seed": 42,
+  "output_path": "/dev/shm/ye/slime/examples/recall_agent/data_tmp_check_xml/bfcl_one.jsonl",
+  "categories": {
+    "multi_turn_miss_param": 1
+  },
+  "sampled_ids": [
+    "multi_turn_miss_param_54"
+  ]
+}

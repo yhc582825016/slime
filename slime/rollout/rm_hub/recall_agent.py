@@ -78,6 +78,11 @@ _BFCL_CHECKER_IMPORTED = False
 _BFCL_MULTI_TURN_CHECKER = None
 _BFCL_MULTI_TURN_IRRELEVANCE_CHECKER = None
 
+TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+FUNCTION_BLOCK_RE = re.compile(r"(<function\s*=\s*.*?</function>)", re.DOTALL)
+FUNCTION_TAG_RE = re.compile(r"<function\s*=\s*['\"]?([a-zA-Z0-9_\-\.]+)['\"]?\s*>", re.DOTALL)
+PARAM_TAG_RE = re.compile(r"<parameter\s*=\s*['\"]?([a-zA-Z0-9_\-\.]+)['\"]?\s*>(.*?)</parameter>", re.DOTALL)
+
 
 def _strip_special_tokens(text: str) -> str:
     if not text:
@@ -97,8 +102,89 @@ def _post_think_text(text: str) -> str:
 
 def _strip_tool_markup(text: str) -> str:
     text = re.sub(r"<tool_call>.*?</tool_call>", " ", text, flags=re.DOTALL)
+    text = re.sub(r"<function\s*=.*?</function>", " ", text, flags=re.DOTALL)
     text = re.sub(r"<tool_response>.*?</tool_response>", " ", text, flags=re.DOTALL)
     return text
+
+
+def _safe_json_loads(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+def _extract_from_function_parameter_markup(text: str) -> dict[str, Any] | None:
+    match_fn = FUNCTION_TAG_RE.search(text)
+    if not match_fn:
+        return None
+
+    fn_name = match_fn.group(1).strip()
+    arguments: dict[str, Any] = {}
+    for match in PARAM_TAG_RE.finditer(text):
+        key = match.group(1).strip()
+        value = _safe_json_loads(match.group(2).strip())
+        arguments[key] = value
+    return {"name": fn_name, "arguments": arguments}
+
+
+def _normalize_tool_payload(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    name = payload.get("name")
+    arguments = payload.get("arguments")
+    if arguments is None:
+        arguments = payload.get("parameters")
+
+    fn_payload = payload.get("function")
+    if isinstance(fn_payload, dict):
+        if not name:
+            name = fn_payload.get("name")
+        if arguments is None:
+            arguments = fn_payload.get("arguments")
+        if arguments is None:
+            arguments = fn_payload.get("parameters")
+    elif (not name) and isinstance(fn_payload, str):
+        name = fn_payload
+
+    if not isinstance(name, str) or not name.strip():
+        return None
+
+    arguments = _safe_json_loads(arguments)
+    if not isinstance(arguments, dict):
+        arguments = {}
+    return {"name": name.strip(), "arguments": arguments}
+
+
+def _extract_balanced_json_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    depth = 0
+    start = None
+    in_string = False
+    escaped = False
+    for idx, ch in enumerate(text):
+        if ch == "\\" and not escaped:
+            escaped = True
+            continue
+        if ch == '"' and not escaped:
+            in_string = not in_string
+        if not in_string:
+            if ch == "{":
+                if start is None:
+                    start = idx
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and start is not None:
+                    candidates.append(text[start : idx + 1])
+                    start = None
+        escaped = False
+    return candidates
 
 
 def _extract_balanced_content(text: str, open_brace_idx: int) -> str | None:
@@ -233,11 +319,6 @@ def _normalize_final_answer(value: str) -> str:
     final_answer = str(value)
     final_answer = final_answer.split("=")[-1]
 
-    for before, after in SUBSTITUTIONS:
-        final_answer = final_answer.replace(before, after)
-    for expr in REMOVED_EXPRESSIONS:
-        final_answer = final_answer.replace(expr, "")
-
     final_answer = re.sub(r"(.*?)(\$)(.*?)(\$)(.*)", "$\\3$", final_answer)
     final_answer = re.sub(r"(\\text\{)(.*?)(\})", "\\2", final_answer)
     final_answer = re.sub(r"(\\textbf\{)(.*?)(\})", "\\2", final_answer)
@@ -247,6 +328,7 @@ def _normalize_final_answer(value: str) -> str:
     final_answer = re.sub(r"(frac)([^{])(.)", "frac{\\2}{\\3}", final_answer)
     final_answer = re.sub(r"(sqrt)([^{])", "sqrt{\\2}", final_answer)
     final_answer = final_answer.replace("$", "")
+    final_answer = " ".join(final_answer.strip().split())
 
     if final_answer.replace(",", "").isdigit():
         final_answer = final_answer.replace(",", "")
@@ -258,6 +340,15 @@ def _safe_normalize_final_answer(value: str) -> str:
         return _normalize_final_answer(value)
     except Exception:
         return str(value).strip()
+
+
+def _compact_normalized_answer(value: str) -> str:
+    normalized = _safe_normalize_final_answer(value)
+    for before, after in SUBSTITUTIONS:
+        normalized = normalized.replace(before, after)
+    for expr in REMOVED_EXPRESSIONS:
+        normalized = normalized.replace(expr, "")
+    return normalized.strip()
 
 
 def _relaxed_match(prediction: str, target: str) -> bool:
@@ -362,6 +453,7 @@ def _prediction_matches_any_target(prediction: str, targets: list[str]) -> bool:
     normalized_prediction = _safe_normalize_final_answer(prediction)
     pred_value = _canonicalize(normalized_prediction)
     raw_pred_value = _canonicalize(prediction)
+    compact_prediction: str | None = None
     for target in targets:
         for candidate in _target_candidates(target):
             normalized_candidate = _safe_normalize_final_answer(candidate)
@@ -374,6 +466,12 @@ def _prediction_matches_any_target(prediction: str, targets: list[str]) -> bool:
                 or _relaxed_match(normalized_prediction, normalized_candidate)
                 or _math_equivalent_match(normalized_prediction, normalized_candidate)
             ):
+                return True
+
+            if compact_prediction is None:
+                compact_prediction = _compact_normalized_answer(prediction)
+            compact_candidate = _compact_normalized_answer(candidate)
+            if compact_prediction == compact_candidate:
                 return True
     return False
 
@@ -431,63 +529,39 @@ def _tool_call_to_python_call(name: str, arguments: dict[str, Any]) -> str:
 
 def _extract_bfcl_tool_calls_from_text(text: str) -> list[str]:
     tool_calls: list[str] = []
-    for block in re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", text or "", flags=re.DOTALL):
-        decoder_candidates: list[Any] = []
+    for block in TOOL_CALL_BLOCK_RE.findall(text or ""):
         block = block.strip()
         if not block:
             continue
-        decoder_candidates.append(block)
 
-        balanced_candidates: list[str] = []
-        depth = 0
-        start = None
-        in_string = False
-        escaped = False
-        for idx, ch in enumerate(block):
-            if ch == "\\" and not escaped:
-                escaped = True
+        if "<function" in block:
+            parsed_payload = _extract_from_function_parameter_markup(block)
+            if parsed_payload is not None:
+                tool_calls.append(
+                    _tool_call_to_python_call(parsed_payload["name"], parsed_payload.get("arguments", {}))
+                )
                 continue
-            if ch == '"' and not escaped:
-                in_string = not in_string
-            if not in_string:
-                if ch == "{":
-                    if start is None:
-                        start = idx
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0 and start is not None:
-                        balanced_candidates.append(block[start : idx + 1])
-                        start = None
-            escaped = False
-        decoder_candidates.extend(balanced_candidates)
 
         parsed_payload = None
-        for candidate in decoder_candidates:
+        for candidate in [block, *_extract_balanced_json_candidates(block)]:
             try:
                 parsed_payload = json.loads(candidate)
                 break
             except Exception:
                 continue
-        if not isinstance(parsed_payload, dict):
+        normalized = _normalize_tool_payload(parsed_payload)
+        if normalized is None:
             continue
+        tool_calls.append(_tool_call_to_python_call(normalized["name"], normalized.get("arguments", {})))
 
-        name = parsed_payload.get("name")
-        arguments = parsed_payload.get("arguments", {})
-        function_wrapper = parsed_payload.get("function")
-        if (not name) and isinstance(function_wrapper, dict):
-            name = function_wrapper.get("name")
-            arguments = function_wrapper.get("arguments", {})
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except Exception:
-                arguments = {}
-        if not isinstance(name, str) or not name.strip():
+    if tool_calls:
+        return tool_calls
+
+    for block in FUNCTION_BLOCK_RE.findall(text or ""):
+        parsed_payload = _extract_from_function_parameter_markup(block)
+        if parsed_payload is None:
             continue
-        if not isinstance(arguments, dict):
-            arguments = {}
-        tool_calls.append(_tool_call_to_python_call(name.strip(), arguments))
+        tool_calls.append(_tool_call_to_python_call(parsed_payload["name"], parsed_payload.get("arguments", {})))
     return tool_calls
 
 

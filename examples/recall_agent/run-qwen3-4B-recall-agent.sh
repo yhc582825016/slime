@@ -1,4 +1,12 @@
 #!/bin/bash
+pkill -9 sglang
+sleep 3
+ray stop --force
+pkill -9 ray
+pkill -9 python
+sleep 3
+pkill -9 ray
+pkill -9 python
 
 set -euo pipefail
 
@@ -6,65 +14,71 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 cd "${ROOT_DIR}"
 
-export PYTHONUNBUFFERED=1
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export RECALL_AGENT_DEBUG_REWARD=1
-HF_CKPT="${HF_CKPT:-/opt/users/models/Qwen3.5-9B}"
-MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
+export PYTHONBUFFERED=16
 
-RAW_TRAIN="${RAW_TRAIN:-/mnt/code/yehangcheng/slime/examples/recall_agent/train_filtered.parquet}"
-RAW_TEST="${RAW_TEST:-/mnt/code/yehangcheng/slime/examples/recall_agent/test_filtered.parquet}"
+HF_CKPT="${HF_CKPT:-/dev/shm/ye/Qwen3-4B}"
+MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
+# https://api.wandb.ai.
+RAW_TRAIN="${RAW_TRAIN:-/dev/shm/ye/rl-data/agent_syn_data/train_filtered.parquet}"
+RAW_TEST="${RAW_TEST:-/dev/shm/ye/rl-data/agent_syn_data/test_filtered.parquet}"
 PROMPT_DATA_DIR="${PROMPT_DATA_DIR:-${SCRIPT_DIR}/data}"
+USE_BFCL_MULTI_TURN_EVAL="${USE_BFCL_MULTI_TURN_EVAL:-1}"
+BFCL_ROOT="${BFCL_ROOT:-/dev/shm/ye/gorilla/berkeley-function-call-leaderboard}"
+BFCL_MULTI_TURN_SAMPLE_SIZE="${BFCL_MULTI_TURN_SAMPLE_SIZE:-200}"
+BFCL_MULTI_TURN_SAMPLE_MODE="${BFCL_MULTI_TURN_SAMPLE_MODE:-per_category}"
+BFCL_MULTI_TURN_SAMPLE_SEED="${BFCL_MULTI_TURN_SAMPLE_SEED:-42}"
+BFCL_MULTI_TURN_EVAL_JSONL="${BFCL_MULTI_TURN_EVAL_JSONL:-${PROMPT_DATA_DIR}/bfcl_multi_turn_test_${BFCL_MULTI_TURN_SAMPLE_SIZE}.jsonl}"
+BFCL_EVAL_BACKEND="${BFCL_EVAL_BACKEND:-official_external}"
+BFCL_OFFICIAL_ROOT="${BFCL_OFFICIAL_ROOT:-/dev/shm/ye/berkeley-function-call-leaderboard}"
+BFCL_EXTERNAL_MODEL_NAME="${BFCL_EXTERNAL_MODEL_NAME:-qwen3-4B-recall-agent-bfcl-official-external}"
+BFCL_EXTERNAL_NUM_THREADS="${BFCL_EXTERNAL_NUM_THREADS:-16}"
+BFCL_EXTERNAL_TEMPERATURE="${BFCL_EXTERNAL_TEMPERATURE:-0.0}"
 PROMPT_TRAIN="${PROMPT_TRAIN:-${PROMPT_DATA_DIR}/train.jsonl}"
 PROMPT_TEST="${PROMPT_TEST:-${PROMPT_DATA_DIR}/test.jsonl}"
 echo "PROMPT_TRAIN: ${PROMPT_TRAIN}"
 echo "PROMPT_TEST: ${PROMPT_TEST}"
-REF_LOAD="${REF_LOAD:-/mnt/code/yehangcheng/checkpoint/Qwen3.5-9B-Thinking_torch_dist}"
+REF_LOAD="${REF_LOAD:-/dev/shm/Qwen3-4B-Thinking_torch_dist}"
 LOAD_PATH="${LOAD_PATH:-${REF_LOAD}}"
-SAVE_PATH="${SAVE_PATH:-/mnt/code/yehangcheng/checkpoint/General_model/slime/Qwen3.5-9B-Thinking_recall_agent}"
-RECALL_AGENT_JOB_LOG="${RECALL_AGENT_JOB_LOG:-/mnt/code/yehangcheng/logs/recall_agent_$(date +%Y%m%d_%H%M%S).log}"
+SAVE_PATH="${SAVE_PATH:-/dev/shm/Qwen3-4B-Thinking_recall_agent}"
+RECALL_AGENT_JOB_LOG="${RECALL_AGENT_JOB_LOG:-/dev/shm/ye/logs/recall_agent_$(date +%Y%m%d_%H%M%S).log}"
 
-# 训练使用 4 张 GPU；若机器多于 4 张且未手动设置 CUDA_VISIBLE_DEVICES，则自动选用物理编号最大的后 4 张卡。
-NUM_GPUS="${NUM_GPUS:-8}"
+NUM_GPUS="${NUM_GPUS:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}"
+if [[ -z "${NUM_GPUS}" || "${NUM_GPUS}" -le 0 ]]; then
+  NUM_GPUS=1
+fi
+
 TP_SIZE="${TP_SIZE:-4}"
-ROLLOUT_NUM_GPUS_PER_ENGINE="${ROLLOUT_NUM_GPUS_PER_ENGINE:-1}"
-DISABLE_JIT_FUSER="${DISABLE_JIT_FUSER:-0}"
-TORCHINDUCTOR_FORCE_DISABLE_CACHES="${TORCHINDUCTOR_FORCE_DISABLE_CACHES:-0}"
-CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-0}"
+ROLLOUT_NUM_GPUS_PER_ENGINE="${ROLLOUT_NUM_GPUS_PER_ENGINE:-2}"
 
-# 显存友好默认（colocate 训练+SGLang 易在权更后 OOM，仍可用环境变量覆盖并按卡调高）。
-MAX_TOKENS_PER_GPU="${MAX_TOKENS_PER_GPU:-3072}"
-ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-16384}"
+MAX_TOKENS_PER_GPU="${MAX_TOKENS_PER_GPU:-6144}"
+ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-20000}"
 NUM_ROLLOUT="${NUM_ROLLOUT:-4000}"
-ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-16}"
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
-GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-64}"
-SAVE_INTERVAL="${SAVE_INTERVAL:-200}"
-OVER_SAMPLING_BATCH_SIZE="${OVER_SAMPLING_BATCH_SIZE:-16}"
-SGLANG_MEM_FRACTION_STATIC="${SGLANG_MEM_FRACTION_STATIC:-0.48}"
-LOG_PROBS_CHUNK_SIZE="${LOG_PROBS_CHUNK_SIZE:-512}"
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-128}"
+SAVE_INTERVAL="${SAVE_INTERVAL:-50}"
+OVER_SAMPLING_BATCH_SIZE="${OVER_SAMPLING_BATCH_SIZE:-32}"
 
 USE_EVAL="${USE_EVAL:-1}"
 EVAL_INTERVAL="${EVAL_INTERVAL:-10}"
 EVAL_DATA_NAME="${EVAL_DATA_NAME:-recall_agent_eval}"
 N_SAMPLES_PER_EVAL_PROMPT="${N_SAMPLES_PER_EVAL_PROMPT:-1}"
-EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-16384}"
+EVAL_MAX_RESPONSE_LEN="${EVAL_MAX_RESPONSE_LEN:-20000}"
 
-USE_WANDB="${USE_WANDB:-0}"
+USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-slime}"
-WANDB_GROUP="${WANDB_GROUP:-recall_agent_qwen3.5_9b}"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-qwen3.5-9B-recall-agent-grpo}"
-WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-04b01529fb630482bdf2f363456479f197ac5694}}"
+WANDB_GROUP="${WANDB_GROUP:-recall_agent_qwen3_4b}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-qwen3-4B-recall-agent}"
+WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY:-}}"
 WANDB_BASE_URL="${WANDB_BASE_URL:-https://api.bandw.top}"
 
-USE_TENSORBOARD="${USE_TENSORBOARD:-1}"
+USE_TENSORBOARD="${USE_TENSORBOARD:-0}"
 TB_PROJECT_NAME="${TB_PROJECT_NAME:-slime}"
 TB_EXPERIMENT_NAME="${TB_EXPERIMENT_NAME:-${WANDB_RUN_NAME}}"
 TENSORBOARD_DIR="${TENSORBOARD_DIR:-$(dirname -- "${SAVE_PATH}")/tensorboard/${TB_PROJECT_NAME}/${TB_EXPERIMENT_NAME}}"
 
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
-
 
 if [[ ! -d "${HF_CKPT}" ]]; then
   echo "[error] HF_CKPT not found: ${HF_CKPT}"
@@ -91,9 +105,27 @@ python "${SCRIPT_DIR}/preprocess_recall_agent_data.py" \
   --test-input "${RAW_TEST}" \
   --output-dir "${PROMPT_DATA_DIR}"
 
+if [[ "${USE_BFCL_MULTI_TURN_EVAL}" == "1" ]]; then
+  if [[ "${BFCL_EVAL_BACKEND}" == "official_external" ]]; then
+    echo "[step] BFCL multi-turn eval is set to official_external backend."
+    echo "[step] switching eval_function_path to official-compatible BFCL eval that reuses the training router."
+  else
+    echo "[step] preparing BFCL multi-turn eval set (${BFCL_MULTI_TURN_SAMPLE_SIZE} samples, seed=${BFCL_MULTI_TURN_SAMPLE_SEED})..."
+    python "${SCRIPT_DIR}/prepare_bfcl_multi_turn_eval.py" \
+      --bfcl-root "${BFCL_ROOT}" \
+      --output-path "${BFCL_MULTI_TURN_EVAL_JSONL}" \
+      --sample-size "${BFCL_MULTI_TURN_SAMPLE_SIZE}" \
+      --seed "${BFCL_MULTI_TURN_SAMPLE_SEED}"
+    PROMPT_TEST="${BFCL_MULTI_TURN_EVAL_JSONL}"
+  fi
+fi
+
+echo "PROMPT_TRAIN (resolved): ${PROMPT_TRAIN}"
+echo "PROMPT_TEST (resolved): ${PROMPT_TEST}"
+
 if [[ ! -d "${REF_LOAD}" ]]; then
   echo "[step] converting HF checkpoint -> torch_dist..."
-  source "${ROOT_DIR}/scripts/models/qwen3.5-9B.sh"
+  source "${ROOT_DIR}/scripts/models/qwen3-4B.sh"
   PYTHONPATH="${MEGATRON_PATH}:${ROOT_DIR}" \
     python "${ROOT_DIR}/tools/convert_hf_to_torch_dist.py" \
     "${MODEL_ARGS[@]}" \
@@ -101,7 +133,7 @@ if [[ ! -d "${REF_LOAD}" ]]; then
     --save "${REF_LOAD}"
 fi
 
-source "${ROOT_DIR}/scripts/models/qwen3.5-9B.sh"
+source "${ROOT_DIR}/scripts/models/qwen3-4B.sh"
 
 CKPT_ARGS=(
   --hf-checkpoint "${HF_CKPT}"
@@ -124,6 +156,7 @@ ROLLOUT_ARGS=(
   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT}"
   --over-sampling-batch-size "${OVER_SAMPLING_BATCH_SIZE}"
   --dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+  --rollout-max-prompt-len 6000
   --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN}"
   --rollout-temperature 1.0
   --global-batch-size "${GLOBAL_BATCH_SIZE}"
@@ -134,7 +167,7 @@ PERF_ARGS=(
   --tensor-model-parallel-size "${TP_SIZE}"
   --sequence-parallel
   --pipeline-model-parallel-size 1
-  --context-parallel-size 1
+  --context-parallel-size 2
   --expert-model-parallel-size 1
   --expert-tensor-parallel-size 1
   --recompute-granularity full
@@ -142,17 +175,12 @@ PERF_ARGS=(
   --recompute-num-layers 1
   --use-dynamic-batch-size
   --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU}"
-  --log-probs-chunk-size "${LOG_PROBS_CHUNK_SIZE}"
 )
-
-if [[ "${DISABLE_JIT_FUSER}" == "1" ]]; then
-  PERF_ARGS+=(--disable-jit-fuser)
-fi
 
 GRPO_ARGS=(
   --advantage-estimator grpo
   --use-kl-loss
-  --kl-loss-coef 0.00
+  --kl-loss-coef 0.001
   --kl-loss-type low_var_kl
   --entropy-coef 0.00
   --eps-clip 0.2
@@ -170,7 +198,7 @@ OPTIMIZER_ARGS=(
 
 SGLANG_ARGS=(
   --rollout-num-gpus-per-engine "${ROLLOUT_NUM_GPUS_PER_ENGINE}"
-  --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION_STATIC}"
+  --sglang-mem-fraction-static 0.55
 )
 
 MISC_ARGS=(
@@ -226,8 +254,6 @@ if [[ "${USE_TENSORBOARD}" == "1" ]]; then
   )
 fi
 
-OFFLOAD_ARGS+=(--no-offload-train)
-
 echo "[step] restarting ray..."
 ray stop --force || true
 pkill -f sglang || true
@@ -239,44 +265,59 @@ ray start --head \
   --dashboard-host=0.0.0.0 \
   --dashboard-port "${RAY_DASHBOARD_PORT}"
 
-RUNTIME_CUDA_JSON=""
-if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-  RUNTIME_CUDA_JSON=",\"CUDA_VISIBLE_DEVICES\": \"${CUDA_VISIBLE_DEVICES}\""
-fi
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"${MEGATRON_PATH}:${ROOT_DIR}\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-    \"TORCHINDUCTOR_FORCE_DISABLE_CACHES\": \"${TORCHINDUCTOR_FORCE_DISABLE_CACHES}\",
-    \"CUDA_LAUNCH_BLOCKING\": \"${CUDA_LAUNCH_BLOCKING}\",
     \"TENSORBOARD_DIR\": \"${TENSORBOARD_DIR}\",
     \"WANDB_API_KEY\": \"${WANDB_API_KEY:-}\",
-    \"WANDB_BASE_URL\": \"${WANDB_BASE_URL}\"${RUNTIME_CUDA_JSON}
+    \"WANDB_BASE_URL\": \"${WANDB_BASE_URL}\",
+    \"BFCL_OFFICIAL_ROOT\": \"${BFCL_OFFICIAL_ROOT}\",
+    \"BFCL_MULTI_TURN_SAMPLE_SIZE\": \"${BFCL_MULTI_TURN_SAMPLE_SIZE}\",
+    \"BFCL_MULTI_TURN_SAMPLE_MODE\": \"${BFCL_MULTI_TURN_SAMPLE_MODE}\",
+    \"BFCL_MULTI_TURN_SAMPLE_SEED\": \"${BFCL_MULTI_TURN_SAMPLE_SEED}\",
+    \"BFCL_EXTERNAL_MODEL_NAME\": \"${BFCL_EXTERNAL_MODEL_NAME}\",
+    \"BFCL_EXTERNAL_NUM_THREADS\": \"${BFCL_EXTERNAL_NUM_THREADS}\",
+    \"BFCL_EXTERNAL_TEMPERATURE\": \"${BFCL_EXTERNAL_TEMPERATURE}\"
   }
 }"
 
+if [[ "${USE_BFCL_MULTI_TURN_EVAL}" == "1" && "${BFCL_EVAL_BACKEND}" == "official_external" ]]; then
+  EVAL_ARGS+=(--eval-function-path examples.recall_agent.bfcl_official_eval.generate_eval)
+fi
+
 echo "[step] submitting ray job (nohup, log: ${RECALL_AGENT_JOB_LOG})..."
+TRAIN_CMD=(
+  python3 train.py
+  --actor-num-nodes 1
+  --actor-num-gpus-per-node "${NUM_GPUS}"
+  --colocate
+  "${MODEL_ARGS[@]}"
+  "${CKPT_ARGS[@]}"
+  "${ROLLOUT_ARGS[@]}"
+  "${EVAL_ARGS[@]}"
+  "${OPTIMIZER_ARGS[@]}"
+  "${GRPO_ARGS[@]}"
+  "${WANDB_ARGS[@]}"
+  "${TENSORBOARD_ARGS[@]}"
+  "${PERF_ARGS[@]}"
+  "${SGLANG_ARGS[@]}"
+  "${MISC_ARGS[@]}"
+  "${CUSTOM_ARGS[@]}"
+)
+
+printf -v TRAIN_CMD_STR '%q ' "${TRAIN_CMD[@]}"
+
 nohup ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
   --runtime-env-json="${RUNTIME_ENV_JSON}" \
-  -- python3 train.py \
-  --actor-num-nodes 1 \
-  --actor-num-gpus-per-node "${NUM_GPUS}" \
-  --colocate \
-  "${OFFLOAD_ARGS[@]}" \
-  "${MODEL_ARGS[@]}" \
-  "${CKPT_ARGS[@]}" \
-  "${ROLLOUT_ARGS[@]}" \
-  "${EVAL_ARGS[@]}" \
-  "${OPTIMIZER_ARGS[@]}" \
-  "${GRPO_ARGS[@]}" \
-  "${WANDB_ARGS[@]}" \
-  "${TENSORBOARD_ARGS[@]}" \
-  "${PERF_ARGS[@]}" \
-  "${SGLANG_ARGS[@]}" \
-  "${MISC_ARGS[@]}" \
-  "${CUSTOM_ARGS[@]}" \
+  -- bash -lc "${TRAIN_CMD_STR}" \
   >> "${RECALL_AGENT_JOB_LOG}" 2>&1 &
 echo "[info] ray job submit pid: $!  (output: ${RECALL_AGENT_JOB_LOG})"
 if [[ "${USE_TENSORBOARD}" == "1" ]]; then
   echo "[info] tensorboard dir: ${TENSORBOARD_DIR}"
+fi
+if [[ "${USE_BFCL_MULTI_TURN_EVAL}" == "1" && "${BFCL_EVAL_BACKEND}" == "official_external" ]]; then
+  echo "[info] post-train BFCL eval backend: ${BFCL_EVAL_BACKEND}"
+  echo "[info] post-train BFCL official root: ${BFCL_OFFICIAL_ROOT}"
+  echo "[info] in-training BFCL eval will reuse the slime training router endpoint chosen at runtime"
 fi
