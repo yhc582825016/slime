@@ -19,7 +19,7 @@ export PYTHONBUFFERED=16
 HF_CKPT="${HF_CKPT:-/dev/shm/Qwen3.5-4B}"
 MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
 # https://api.wandb.ai.
-RAW_TRAIN="${RAW_TRAIN:-/dev/shm/ye/rl-data/agent_syn_data/recall/synthetic_mock_success_only_8.parquet}"
+RAW_TRAIN="${RAW_TRAIN:-/dev/shm/ye/rl-data/agent_world/agent_world_recall_train.parquet}"
 RAW_TEST="${RAW_TEST:-/dev/shm/ye/rl-data/agent_syn_data/test_filtered.parquet}"
 PROMPT_DATA_DIR="${PROMPT_DATA_DIR:-${SCRIPT_DIR}/data}"
 USE_BFCL_MULTI_TURN_EVAL="${USE_BFCL_MULTI_TURN_EVAL:-1}"
@@ -39,7 +39,7 @@ echo "PROMPT_TRAIN: ${PROMPT_TRAIN}"
 echo "PROMPT_TEST: ${PROMPT_TEST}"
 REF_LOAD="${REF_LOAD:-/dev/shm/Qwen3.5-4B-Thinking_torch_dist}"
 LOAD_PATH="${LOAD_PATH:-${REF_LOAD}}"
-SAVE_PATH="${SAVE_PATH:-/dev/shm/Qwen3.5-4B-Thinking_recall_agent_411}"
+SAVE_PATH="${SAVE_PATH:-/dev/shm/Qwen3.5-4B-Thinking_recall_agent_430}"
 RECALL_AGENT_JOB_LOG="${RECALL_AGENT_JOB_LOG:-/dev/shm/ye/logs/recall_agent_$(date +%Y%m%d_%H%M%S).log}"
 
 NUM_GPUS="${NUM_GPUS:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}"
@@ -86,6 +86,7 @@ if [[ ! -d "${HF_CKPT}" ]]; then
 fi
 if [[ ! -f "${RAW_TRAIN}" ]]; then
   echo "[error] RAW_TRAIN not found: ${RAW_TRAIN}"
+  echo "[hint] expected a recall parquet file for preprocess_recall_agent_data.py"
   exit 1
 fi
 if [[ ! -f "${RAW_TEST}" ]]; then

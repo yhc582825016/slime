@@ -13,8 +13,8 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_REFERENCE_HF_DIR = Path("/dev/shm/Qwen3.5-4B")
 DEFAULT_BASE_TORCH_DIST_DIR = Path("/dev/shm/Qwen3.5-4B-Thinking_torch_dist/release")
-DEFAULT_INPUT_DIR = Path("/dev/shm/Qwen3.5-4B-Thinking_recall_agent_411/iter_0000049")
-DEFAULT_OUTPUT_DIR = Path("/dev/shm/Qwen3.5-4B-Thinking_recall_agent_414_hf_full/iter_0000049")
+DEFAULT_INPUT_DIR = Path("/dev/shm/Qwen3.5-4B-Thinking_recall_agent_423/iter_0000049")
+DEFAULT_OUTPUT_DIR = Path("/dev/shm/Qwen3.5-4B-Thinking_recall_agent_423_hf_full/iter_0000049")
 
 
 def parse_args():
