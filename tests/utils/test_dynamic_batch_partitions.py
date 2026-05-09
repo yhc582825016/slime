@@ -73,6 +73,15 @@ def test_capped_partitions_allows_single_oversize_sample() -> None:
 
 
 @pytest.mark.unit
+def test_capped_partitions_redistributes_empty_partitions() -> None:
+    data_module = load_data_module()
+
+    partitions = data_module._get_capped_partitions([400, 100, 100], num_partitions=3, max_tokens=300)
+
+    assert partitions == [[0], [1], [2]]
+
+
+@pytest.mark.unit
 def test_capped_partitions_raises_clear_error_when_partition_count_is_too_small() -> None:
     data_module = load_data_module()
 

@@ -327,6 +327,32 @@ def _get_capped_partitions(seqlen_list: Sequence[int], num_partitions: int, max_
             oversize_samples,
         )
 
+    # After all_reduce MAX across DP ranks, this rank may have more partitions than
+    # its local first-fit needed, leaving trailing partitions empty. Megatron still
+    # expects every rank to feed the same number of non-empty micro-batches, so
+    # redistribute one sample from the largest partition into each empty slot.
+    empty_slots = [i for i, p in enumerate(partitions) if not p]
+    if empty_slots:
+        logger.warning(
+            "cap-aware partitioning produced %d empty partition(s) "
+            "(num_partitions=%d exceeds local packing need); redistributing samples.",
+            len(empty_slots),
+            num_partitions,
+        )
+        for empty_idx in empty_slots:
+            # Pick the partition with the most samples to donate one.
+            src_idx = max(range(num_partitions), key=lambda i: len(partitions[i]))
+            if len(partitions[src_idx]) < 2:
+                raise AssertionError(
+                    f"Cannot fill empty partitions: no partition has >=2 samples. "
+                    f"lengths={list(seqlen_list)}, num_partitions={num_partitions}, "
+                    f"max_tokens={max_tokens}"
+                )
+            donated = partitions[src_idx].pop()
+            partitions[empty_idx].append(donated)
+            sums[empty_idx] = seqlen_list[donated]
+            sums[src_idx] -= seqlen_list[donated]
+
     return [sorted(p) for p in partitions]
 
 

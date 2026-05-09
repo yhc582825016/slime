@@ -29,6 +29,20 @@ def validate_args(args):
         )
 
 
+def _hf_config_is_moe(hf_config) -> bool:
+    """True when HF config describes a MoE model (Megatron ffn_hidden_size is not HF intermediate_size)."""
+    for attr in ("num_experts", "n_routed_experts", "num_local_experts"):
+        n = getattr(hf_config, attr, None)
+        if n is None:
+            continue
+        try:
+            if int(n) > 1:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _hf_validate_args(args, hf_config):
     def equal(x, y):
         return x == y
@@ -48,6 +62,8 @@ def _hf_validate_args(args, hf_config):
     else:
         _hf_rope_theta = getattr(hf_config, "rope_theta", None)
 
+    hf_moe = _hf_config_is_moe(hf_config)
+
     for hf_config_name, megatron_config_name, compare_fn in [
         ("hidden_size", "hidden_size", equal),
         ("num_attention_heads", "num_attention_heads", equal),
@@ -56,12 +72,24 @@ def _hf_validate_args(args, hf_config):
         ("tie_word_embeddings", "untie_embeddings_and_output_weights", lambda x, y: not x == y),
         ("rms_norm_eps", "norm_epsilon", equal),
     ]:
-        if hasattr(hf_config, hf_config_name):
-            if not compare_fn(getattr(hf_config, hf_config_name), getattr(args, megatron_config_name)):
+        if not hasattr(hf_config, hf_config_name):
+            continue
+        # MoE (e.g. Qwen3.5-35B-A3B): HF `intermediate_size` is not Megatron dense `ffn_hidden_size`
+        # (routed experts use `moe_intermediate_size` <-> `moe_ffn_hidden_size`).
+        if hf_config_name == "intermediate_size" and megatron_config_name == "ffn_hidden_size" and hf_moe:
+            moe_hf = getattr(hf_config, "moe_intermediate_size", None)
+            moe_mg = getattr(args, "moe_ffn_hidden_size", None)
+            if moe_hf is not None and moe_mg is not None and not equal(moe_hf, moe_mg):
                 errors.append(
-                    f"{hf_config_name} in hf config {getattr(hf_config, hf_config_name)} is not equal to "
-                    f"{megatron_config_name} {getattr(args, megatron_config_name)}, please check the config."
+                    f"moe_intermediate_size in hf config {moe_hf} is not equal to "
+                    f"moe_ffn_hidden_size {moe_mg}, please check the config."
                 )
+            continue
+        if not compare_fn(getattr(hf_config, hf_config_name), getattr(args, megatron_config_name)):
+            errors.append(
+                f"{hf_config_name} in hf config {getattr(hf_config, hf_config_name)} is not equal to "
+                f"{megatron_config_name} {getattr(args, megatron_config_name)}, please check the config."
+            )
 
     # Validate rope_theta separately using the resolved value
     if _hf_rope_theta is not None:

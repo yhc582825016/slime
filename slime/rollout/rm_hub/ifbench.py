@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import logging
 import os
-import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,25 +10,16 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
-_WORKSPACE_PARENT = _WORKSPACE_ROOT.parent
-_LOCAL_IFBENCH_REQUIREMENTS = _WORKSPACE_ROOT / "examples" / "eval_multi_task" / "requirements_ifbench.txt"
+_LOCAL_IFBENCH_REPO = Path("/mnt/code/yehangcheng/Evaluation/IFBench")
 
 
 def _ensure_ifbench_repo() -> Path:
-    """Clone IFBench repo if needed and ensure it is available on sys.path."""
+    """Use the local IFBench checkout and ensure it is available on sys.path."""
 
-    repo_path = _WORKSPACE_PARENT / "IFBench"
+    repo_path = _LOCAL_IFBENCH_REPO
 
     if not repo_path.exists():
-        clone_cmd = ["git", "clone", "https://github.com/allenai/IFBench.git", str(repo_path)]
-        try:
-            subprocess.run(clone_cmd, check=True, capture_output=True)
-        except Exception as exc:
-            raise ImportError(
-                "Unable to automatically clone IFBench. Please clone "
-                "https://github.com/allenai/IFBench.git into the repo root."
-            ) from exc
+        raise ImportError(f"Local IFBench repo not found at: {repo_path}")
 
     repo_str = str(repo_path)
     if repo_str not in sys.path:
@@ -44,35 +34,12 @@ def _ensure_ifbench_repo() -> Path:
     return repo_path
 
 
-def _ensure_ifbench_dependencies(repo_path: Path) -> None:
-    """Install IFBench requirements the first time the module is imported."""
-
-    requirements_file = _LOCAL_IFBENCH_REQUIREMENTS
-
-    if not requirements_file.exists():
-        logger.debug("Local IFBench requirements file not found at %s; skipping install.", requirements_file)
-        return
-
-    sentinel = repo_path / ".deps_installed"
-    if sentinel.exists():
-        return
-
-    install_cmd = [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)]
-    try:
-        subprocess.run(install_cmd, check=True)
-    except Exception as exc:
-        logger.warning("Failed to install IFBench dependencies automatically: %s", exc)
-    else:
-        sentinel.write_text("installed\n")
-
-
 def _load_evaluation_lib():
     repo_path = _ensure_ifbench_repo()
     try:
         return importlib.import_module("evaluation_lib")
-    except ImportError:
-        _ensure_ifbench_dependencies(repo_path)
-        return importlib.import_module("evaluation_lib")
+    except ImportError as exc:
+        raise ImportError(f"Failed to import IFBench evaluation_lib from local repo: {repo_path}") from exc
 
 
 evaluation_lib = _load_evaluation_lib()

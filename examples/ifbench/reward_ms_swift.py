@@ -1,6 +1,6 @@
 import inspect
+import importlib.util
 import json
-import os
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -36,44 +36,47 @@ def _normalize_value(value: Any) -> Any:
 
 def _parse_json_like(value: Any) -> Any:
     if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except Exception:
-            return value
+        # try:
+        return json.loads(value)
+        # except Exception:
+            # return value
     return value
-
-
-def _candidate_ifbench_dirs() -> list[Path]:
-    repo_root = Path(__file__).resolve().parents[2]
-    candidates = []
-
-    env_path = os.environ.get("MS_SWIFT_IFBENCH_DIR")
-    if env_path:
-        candidates.append(Path(env_path))
-
-    candidates.append(repo_root.parent / "ms-swift" / "plugin" / "IFbench")
-    candidates.append(Path("/dev/shm/ye/ms-swift/plugin/IFbench"))
-    return candidates
 
 
 @lru_cache(maxsize=1)
 def _load_instructions_registry():
-    for candidate in _candidate_ifbench_dirs():
-        if not candidate.exists():
-            continue
-        candidate_str = str(candidate)
-        if candidate_str not in sys.path:
-            sys.path.insert(0, candidate_str)
-        import instructions_registry
+    # Force-load the legacy IFBench instruction stack from this directory so
+    # it won't be confused with the newer Evaluation/IFBench modules.
+    this_dir = Path(__file__).resolve().parent
+    module_paths = {
+        "instructions_util": this_dir / "instructions_util.py",
+        "instructions": this_dir / "instructions.py",
+    }
+    saved_modules = {name: sys.modules.get(name) for name in (*module_paths.keys(), "instructions_registry")}
 
-        return instructions_registry
+    try:
+        for module_name, module_path in module_paths.items():
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Unable to load {module_name} from {module_path}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
 
-    searched = ", ".join(str(path) for path in _candidate_ifbench_dirs())
-    raise ImportError(
-        "Unable to locate ms-swift IFBench plugin directory. "
-        "Set MS_SWIFT_IFBENCH_DIR to the directory containing instructions_registry.py. "
-        f"Searched: {searched}"
-    )
+        registry_path = this_dir / "instructions_registry.py"
+        registry_name = "_slime_ifbench_legacy_instructions_registry"
+        spec = importlib.util.spec_from_file_location(registry_name, registry_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Unable to load instructions_registry from {registry_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for module_name, old_module in saved_modules.items():
+            if old_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = old_module
 
 
 def _extract_info(sample: Sample) -> dict[str, Any]:
@@ -93,6 +96,77 @@ def _extract_info(sample: Sample) -> dict[str, Any]:
             return payload
 
     return {}
+
+
+def _extract_rm_type(sample: Sample) -> str:
+    if isinstance(sample.metadata, dict):
+        raw = sample.metadata.get("rm_type")
+        if raw is not None:
+            return str(raw).strip()
+        extra_info = _parse_json_like(sample.metadata.get("extra_info"))
+        if isinstance(extra_info, dict) and extra_info.get("rm_type") is not None:
+            return str(extra_info["rm_type"]).strip()
+    return ""
+
+
+def _extract_prompt_text(sample: Sample) -> str:
+    prompt = sample.prompt
+    if isinstance(prompt, str):
+        return prompt
+    if isinstance(prompt, list):
+        parts: list[str] = []
+        for turn in prompt:
+            if isinstance(turn, dict):
+                content = turn.get("content")
+                if content is not None:
+                    parts.append(str(content))
+        return "\n".join(parts)
+    return str(prompt or "")
+
+
+def _should_use_builtin_ifbench(sample: Sample, info: dict[str, Any]) -> bool:
+    rm_type = _extract_rm_type(sample)
+    if rm_type == "ifbench":
+        return True
+
+    # Legacy train data carries these extra fields, while eval data typically does not.
+    if "constraint" in info or "constraint_type" in info:
+        return False
+
+    return any(key in info for key in ("record_id", "prompt_text", "kwargs"))
+
+
+def _build_builtin_ifbench_metadata(sample: Sample, info: dict[str, Any]) -> dict[str, Any]:
+    instruction_ids = [str(x) for x in _to_list(_parse_json_like(info.get("instruction_id_list", [])))]
+    raw_kwargs = info.get("kwargs", info.get("instruction_kwargs", []))
+    kwargs_list = [_normalize_value(v) for v in _to_list(_parse_json_like(raw_kwargs))]
+
+    metadata: dict[str, Any] = {
+        "instruction_id_list": instruction_ids,
+        "kwargs": kwargs_list,
+        "prompt_text": str(info.get("prompt_text") or _extract_prompt_text(sample)),
+    }
+    if info.get("record_id") is not None:
+        metadata["record_id"] = info.get("record_id")
+    return metadata
+
+
+def _extract_answer(response: str) -> str:
+    """Extract the answer after </think> for thinking models.
+
+    If no </think> is found but <think> is present (e.g. degenerate generation
+    that never closes the thinking block), fall back to the text after the last
+    <think> tag so we don't accidentally evaluate raw thinking tokens as the answer.
+    If neither tag is present, return the full response unchanged.
+    """
+    end_think_idx = response.rfind("</think>")
+    if end_think_idx != -1:
+        return response[end_think_idx + len("</think>"):].strip()
+    # Degenerate case: model opened <think> but never closed it
+    start_think_idx = response.rfind("<think>")
+    if start_think_idx != -1:
+        return response[start_think_idx + len("<think>"):].strip()
+    return response
 
 
 def _strict_hits(solution_str: str, instruction_id_list: list[str], kwargs_list: list[dict[str, Any]]) -> list[bool]:
@@ -123,6 +197,13 @@ async def reward_func(args, sample: Sample, **kwargs) -> float:
         raise TypeError("sample must be an instance of slime.utils.types.Sample")
 
     info = _extract_info(sample)
+    if _should_use_builtin_ifbench(sample, info):
+        from slime.rollout.rm_hub.ifbench import compute_ifbench_reward
+
+        answer = _extract_answer(sample.response or "")
+        metadata = _build_builtin_ifbench_metadata(sample, info)
+        return float(compute_ifbench_reward(answer, sample.label, metadata=metadata))
+
     instruction_id_list = [str(x) for x in _to_list(_parse_json_like(info.get("instruction_id_list", [])))]
     raw_kwargs = info.get("instruction_kwargs", info.get("kwargs", []))
     kwargs_list = _to_list(_parse_json_like(raw_kwargs))
@@ -130,10 +211,11 @@ async def reward_func(args, sample: Sample, **kwargs) -> float:
     if not instruction_id_list:
         return 0.0
 
-    try:
-        hits = _strict_hits(sample.response or "", instruction_id_list, kwargs_list)
-    except Exception:
-        return 0.0
+    # try:
+    answer = _extract_answer(sample.response or "")
+    hits = _strict_hits(answer, instruction_id_list, kwargs_list)
+    # except Exception:
+    #     return 0.0
 
     return 1.0 if hits and all(hits) else 0.0
 

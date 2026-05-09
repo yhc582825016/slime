@@ -16,7 +16,34 @@ DEFAULT_PATCH_SIZE = 14
 
 
 def load_tokenizer(name_or_path: str, **kwargs):
-    return AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+    try:
+        return AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+    except ValueError as e:
+        # Some checkpoints (e.g. exported via ms-swift) set `tokenizer_class` to a
+        # non-HF class name like "TokenizersBackend".  Retry without that field by
+        # temporarily overriding via `tokenizer_config.json`-bypass: pass the path
+        # directly and let transformers pick the right class from `model_type`.
+        err_msg = str(e)
+        if "does not exist or is not currently imported" in err_msg:
+            logger.warning(
+                "AutoTokenizer failed (%s). Retrying with use_fast=False to bypass "
+                "unrecognised tokenizer_class.",
+                err_msg,
+            )
+            return AutoTokenizer.from_pretrained(name_or_path, use_fast=False, **kwargs)
+        raise
+    except KeyError as e:
+        # New model families (e.g. Qwen3.5-MoE with Qwen3_5MoeConfig) may not yet be
+        # registered in the TOKENIZER_MAPPING of the installed transformers version.
+        # Fall back to PreTrainedTokenizerFast which loads directly from tokenizer.json.
+        logger.warning(
+            "AutoTokenizer failed with KeyError (%s) — model type not registered in "
+            "TOKENIZER_MAPPING. Falling back to PreTrainedTokenizerFast.",
+            e,
+        )
+        from transformers import PreTrainedTokenizerFast
+
+        return PreTrainedTokenizerFast.from_pretrained(name_or_path, **kwargs)
 
 
 def build_processor_kwargs(multimodal_inputs: dict | None = None) -> dict:
