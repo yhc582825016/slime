@@ -1,0 +1,78 @@
+Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple
+Collecting reasoning-gym
+  Downloading https://pypi.tuna.tsinghua.edu.cn/packages/42/21/bb9f6d2f76424f8b516fe83f8026e52e466b0202341bb4ee7a9861e06277/reasoning_gym-0.1.25-py3-none-any.whl (7.0 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.0/7.0 MB 5.5 MB/s  0:00:01
+Collecting arckit==0.1.0 (from reasoning-gym)
+  Downloading https://pypi.tuna.tsinghua.edu.cn/packages/4f/9d/47866ae3ae517df13919a69f34a6c86e7ddf52ecc219f08e2cf8301ec5d5/arckit-0.1.0-py3-none-any.whl (730 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 730.3/730.3 kB 10.3 MB/s  0:00:00
+Collecting bfi==1.0.4 (from reasoning-gym)
+  Downloading https://pypi.tuna.tsinghua.edu.cn/packages/a4/47/6a303e4e0fadf5b8604b229b84f786a3f02bf8825468ca29c1e8a2201cea/bfi-1.0.4-py3-none-any.whl (159 kB)
+Collecting cellpylib==2.4.0 (from reasoning-gym)
+  Downloading https://pypi.tuna.tsinghua.edu.cn/packages/a8/1e/c606ac9bf0277524cd935d6c2bb5b387c3bf401fa8ddbb59b622d6dd50af/cellpylib-2.4.0.tar.gz (38 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting magiccube==0.3.0 (from reasoning-gym)
+  Downloading https://pypi.tuna.tsinghua.edu.cn/packages/f7/8d/354a7357e03fb9277401989b7866b8f05ae407319e7bc450b958f9187308/magiccube-0.3.0-py3-none-any.whl (16 kB)
+Collecting pycosat==0.6.6 (from reasoning-gym)
+  Downloading https://pypi.tuna.tsinghua.edu.cn/packages/5b/81/cf8ebf77fc4f06f680ad3ee43d0d01826f6d6054828f1cf3b42d944b82a1/pycosat-0.6.6.tar.gz (71 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting pyfiglet==1.0.2 (from reasoning-gym)
+  Downloading https://pypi.tuna.tsinghua.edu.cn/packages/1a/03/bef6fff907e212d67a0003f8ea4819307bba91b2856074a0763dd483ccc4/pyfiglet-1.0.2-py3-none-any.whl (1.1 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.1/1.1 MB 11.8 MB/s  0:00:00
+Collecting pytz>=2024.1 (from reasoning-gym)
+  Downloading https://pypi.tuna.tsinghua.edu.cn/packages/ec/dd/96da98f892250475bdf2328112d7468abdd4acc7b902b6af23f4ed958ea0/pytz-2026.2-py2.py3-none-any.whl (510 kB)
+Requirement already satisfied: pyyaml>=6.0.2 in /usr/local/lib/python3.12/dist-packages (from reasoning-gym) (6.0.3)
+Requirement already satisfied: sympy>=1.13.1 in /usr/local/lib/python3.12/dist-packages (from reasoning-gym) (1.14.0)
+Requirement already satisfied: tabulate==0.9.0 in /usr/local/lib/python3.12/dist-packages (from reasoning-gym) (0.9.0)
+Collecting zss>=1.2.0 (from reasoning-gym)
+  Downloading https://pypi.tuna.tsinghua.edu.cn/packages/1e/d1/ed34d12f55d07cc1efb61d74fb2f64f46a705557f5bdd1ef1b810f0e2ec5/zss-1.2.0.tar.gz (9.8 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Requirement already satisfied: numpy in /usr/local/lib/python3.12/dist-packages (from arckit==0.1.0->reasoning-gym) (1.26.4)
+Requirement already satisfied: rich in /usr/local/lib/python3.12/dist-packages (from arckit==0.1.0->reasoning-gym) (13.9.4)
+Collecting drawsvg (from arckit==0.1.0->reasoning-gym)
+  Downloading https://pypi.tuna.tsinghua.edu.cn/packages/bf/07/a2c3db84e6af6fa761de905b39109fe24eff2c8d52653c1bff968b6b965d/drawsvg-2.4.1-py3-none-any.whl (44 kB)
+Requirement already satisfied: matplotlib>=3.0.2 in /usr/local/lib/python3.12/dist-packages (from cellpylib==2.4.0->reasoning-gym) (3.10.8)
+Requirement already satisfied: contourpy>=1.0.1 in /usr/local/lib/python3.12/dist-packages (from matplotlib>=3.0.2->cellpylib==2.4.0->reasoning-gym) (1.3.3)
+Requirement already satisfied: cycler>=0.10 in /usr/local/lib/python3.12/dist-packages (from matplotlib>=3.0.2->cellpylib==2.4.0->reasoning-gym) (0.12.1)
+Requirement already satisfied: fonttools>=4.22.0 in /usr/local/lib/python3.12/dist-packages (from matplotlib>=3.0.2->cellpylib==2.4.0->reasoning-gym) (4.61.1)
+Requirement already satisfied: kiwisolver>=1.3.1 in /usr/local/lib/python3.12/dist-packages (from matplotlib>=3.0.2->cellpylib==2.4.0->reasoning-gym) (1.4.9)
+Requirement already satisfied: packaging>=20.0 in /usr/local/lib/python3.12/dist-packages (from matplotlib>=3.0.2->cellpylib==2.4.0->reasoning-gym) (26.0)
+Requirement already satisfied: pillow>=8 in /usr/local/lib/python3.12/dist-packages (from matplotlib>=3.0.2->cellpylib==2.4.0->reasoning-gym) (11.3.0)
+Requirement already satisfied: pyparsing>=3 in /usr/lib/python3/dist-packages (from matplotlib>=3.0.2->cellpylib==2.4.0->reasoning-gym) (3.1.1)
+Requirement already satisfied: python-dateutil>=2.7 in /usr/local/lib/python3.12/dist-packages (from matplotlib>=3.0.2->cellpylib==2.4.0->reasoning-gym) (2.9.0.post0)
+Requirement already satisfied: six>=1.5 in /usr/local/lib/python3.12/dist-packages (from python-dateutil>=2.7->matplotlib>=3.0.2->cellpylib==2.4.0->reasoning-gym) (1.17.0)
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in /usr/local/lib/python3.12/dist-packages (from sympy>=1.13.1->reasoning-gym) (1.3.0)
+Requirement already satisfied: markdown-it-py>=2.2.0 in /usr/local/lib/python3.12/dist-packages (from rich->arckit==0.1.0->reasoning-gym) (4.0.0)
+Requirement already satisfied: pygments<3.0.0,>=2.13.0 in /usr/local/lib/python3.12/dist-packages (from rich->arckit==0.1.0->reasoning-gym) (2.19.2)
+Requirement already satisfied: mdurl~=0.1 in /usr/local/lib/python3.12/dist-packages (from markdown-it-py>=2.2.0->rich->arckit==0.1.0->reasoning-gym) (0.1.2)
+Building wheels for collected packages: cellpylib, pycosat, zss
+  Building wheel for cellpylib (pyproject.toml): started
+  Building wheel for cellpylib (pyproject.toml): finished with status 'done'
+  Created wheel for cellpylib: filename=cellpylib-2.4.0-py3-none-any.whl size=38010 sha256=53bfa75873edbce5c740f319ccf06a6db7101a546be5b4d05eb1a4e25da75826
+  Stored in directory: /root/.cache/pip/wheels/ad/74/7a/6abadfb0acd20dffa6f764239a4ba76a7fa1fdcb63f15c0b5f
+  Building wheel for pycosat (pyproject.toml): started
+  Building wheel for pycosat (pyproject.toml): finished with status 'done'
+  Created wheel for pycosat: filename=pycosat-0.6.6-cp312-cp312-linux_x86_64.whl size=172605 sha256=a50ca23dc0b3d411160205f3bba62c82b0af50c3251ded503e09453e67ac3103
+  Stored in directory: /root/.cache/pip/wheels/0d/47/ab/aecbfd24775992ff93cfd14a1bbd4ffc0ac7a8fda522a16983
+  Building wheel for zss (pyproject.toml): started
+  Building wheel for zss (pyproject.toml): finished with status 'done'
+  Created wheel for zss: filename=zss-1.2.0-py3-none-any.whl size=6791 sha256=15ad570b4215e71e81292a3b41962a592b2704a908710a326d0f936158ed34d8
+  Stored in directory: /root/.cache/pip/wheels/ca/4e/10/6d10493311bd04696b7e77abf19a4cfcd62380b7d1d2ffc5b8
+Successfully built cellpylib pycosat zss
+Installing collected packages: pytz, pycosat, drawsvg, bfi, zss, pyfiglet, magiccube, cellpylib, arckit, reasoning-gym
+
+Successfully installed arckit-0.1.0 bfi-1.0.4 cellpylib-2.4.0 drawsvg-2.4.1 magiccube-0.3.0 pycosat-0.6.6 pyfiglet-1.0.2 pytz-2026.2 reasoning-gym-0.1.25 zss-1.2.0

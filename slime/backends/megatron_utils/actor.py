@@ -105,7 +105,11 @@ class MegatronTrainRayActor(TrainRayActor):
                 self.args,
                 self.model,
                 convert_to_global_name=args.megatron_to_hf_mode == "raw",
-                translate_gpu_to_cpu=not self.args.enable_weights_backuper,
+                # torch_memory_saver CPU backups require LD_PRELOAD and are only
+                # initialized for offload_train Megatron workers. In normal
+                # training, disabling weights_backuper should not implicitly
+                # depend on torch_memory_saver being active.
+                translate_gpu_to_cpu=(not self.args.enable_weights_backuper) and self.args.offload_train,
             ),
             single_tag=None if args.enable_weights_backuper else "actor",
         )

@@ -297,26 +297,45 @@ def _get_capped_partitions(seqlen_list: Sequence[int], num_partitions: int, max_
     preserve the existing dynamic-batching contract and let the sample occupy
     its own partition.
     """
-    partitions: list[list[int]] = [[] for _ in range(num_partitions)]
-    sums = [0] * num_partitions
+    if num_partitions <= 0:
+        return []
+
+    partitions: list[list[int]] = []
+    sums: list[int] = []
     oversize_samples: list[tuple[int, int]] = []
 
     for idx, length in enumerate(seqlen_list):
-        for i in range(num_partitions):
+        if length > max_tokens:
+            oversize_samples.append((idx, length))
+        for i in range(len(partitions)):
             if sums[i] + length <= max_tokens:
                 partitions[i].append(idx)
                 sums[i] += length
                 break
-            if not partitions[i] and length > max_tokens:
-                partitions[i].append(idx)
-                sums[i] = length
-                oversize_samples.append((idx, length))
-                break
         else:
+            if len(partitions) >= num_partitions:
+                raise AssertionError(
+                    "Unable to partition samples within the token cap. "
+                    f"lengths={list(seqlen_list)}, num_partitions={num_partitions}, max_tokens={max_tokens}"
+                )
+            partitions.append([idx])
+            sums.append(length)
+
+    # The DP all-reduce can request more micro-batches than this rank needs.
+    # Keep every micro-batch non-empty by splitting existing multi-sample
+    # partitions; singleton samples always satisfy the cap unless they were
+    # already recorded as oversize above.
+    while len(partitions) < num_partitions:
+        split_idx = max(range(len(partitions)), key=lambda i: len(partitions[i]), default=-1)
+        if split_idx < 0 or len(partitions[split_idx]) <= 1:
             raise AssertionError(
-                "Unable to partition samples within the token cap. "
+                "Unable to create the requested number of non-empty micro-batches. "
                 f"lengths={list(seqlen_list)}, num_partitions={num_partitions}, max_tokens={max_tokens}"
             )
+        moved = partitions[split_idx].pop()
+        sums[split_idx] -= seqlen_list[moved]
+        partitions.append([moved])
+        sums.append(seqlen_list[moved])
 
     if oversize_samples:
         logger.warning(

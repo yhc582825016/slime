@@ -1,8 +1,11 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Iterable
+import logging
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 _SourceGetter = Callable[[], Iterable[tuple[str, torch.Tensor]]]
 
@@ -56,8 +59,15 @@ class _TensorBackuperNormal(TensorBackuper):
         backup_dict = self._backups[tag]
         for name, param in self._source_getter():
             if name not in backup_dict:
-                backup_dict[name] = torch.empty_like(param, device=torch.device("cpu"), pin_memory=True)
-            backup_dict[name].copy_(param.detach(), non_blocking=True)
+                try:
+                    backup_dict[name] = torch.empty_like(param, device=torch.device("cpu"), pin_memory=True)
+                except Exception as e:
+                    # Some CUDA/PyTorch stacks fail on pinned CPU allocations for
+                    # specific tensors or surface an async CUDA error here.
+                    # Fallback to regular CPU memory so multi-tag backup still works.
+                    logger.warning("Falling back to non-pinned CPU backup for %s: %s", name, e)
+                    backup_dict[name] = torch.empty_like(param, device=torch.device("cpu"))
+            backup_dict[name].copy_(param.detach(), non_blocking=backup_dict[name].is_pinned())
         torch.cuda.synchronize()
 
     @torch.no_grad()

@@ -12,6 +12,16 @@
 set -ex
 
 export PYTHONBUFFERED=16
+ray stop --force
+# pkill -f sglang
+# pkill -f slime
+
+# Ray Job uses this shell's cwd as the job working directory when packaging code.
+# If you run this script from e.g. --hf-checkpoint, `python3 train.py` resolves there and fails.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SLIME_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${SLIME_ROOT}"
+echo "Using SLIME_ROOT=${SLIME_ROOT} as cwd for ray job submit"
 
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 if [ "$NVLINK_COUNT" -gt 0 ]; then
@@ -21,28 +31,29 @@ else
 fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
-source "/root/slime/scripts/models/qwen3-8B.sh"
+source "/mnt/code/yehangcheng/slime/scripts/models/qwen3.5-4B.sh"
 
 
 CKPT_ARGS=(
-   --hf-checkpoint /root/Qwen3-8B
-   --ref-load /root/Qwen3-8B_torch_dist
-   --load /root/Qwen3-8B_slime/
-   --save /root/Qwen3-8B_slime/
+   --hf-checkpoint /opt/users/models/Qwen3.5-4B
+   --ref-load /opt/users/models/Qwen3.5-4B-Thinking_torch_dist
+   --load /mnt/code/yehangcheng/checkpoint/General_model/qwen3.5-opd-509
+   --save /mnt/code/yehangcheng/checkpoint/General_model/qwen3.5-opd-509
    --save-interval 20
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
-   --input-key prompt
+   --prompt-data /mnt/code/yehangcheng/all_data/rl_data_repo/IF/Nemotron-post-training/if_difficulty_9_10_swift.jsonl
+   --input-key messages
+   --label-key solution
    --apply-chat-template
+   --apply-chat-template-kwargs '{"enable_thinking": false}'
    --rollout-shuffle
    --num-rollout 300
    --rollout-batch-size 16
    --n-samples-per-prompt 4
-   --rollout-max-response-len 16384
+   --rollout-max-response-len 8192
    --rollout-temperature 1
-
    --global-batch-size 64
    --balance-data
 )
@@ -72,6 +83,7 @@ PERF_ARGS=(
    --recompute-num-layers 1
 
    # --micro-batch-size 1
+   --log-probs-chunk-size 1024
    --use-dynamic-batch-size
    --max-tokens-per-gpu 16384
 )
@@ -84,7 +96,7 @@ GRPO_ARGS=(
    --opd-type megatron                                # Use Megatron forward for teacher
    --opd-kl-coef 1.0                                  # CHANGE THIS: KL penalty coefficient
    # Teacher model configuration (CHANGE THIS to a stronger model!)
-   --opd-teacher-load /root/Qwen3-8B_torch_dist      # Teacher model path
+   --opd-teacher-load /opt/users/models/Qwen3.5-4B-Thinking_torch_dist      # Teacher model path
    
    --use-kl-loss
    --kl-loss-coef 0.00
@@ -126,32 +138,42 @@ MISC_ARGS=(
 
 
 # launch the master node of ray in container
+# If you see: "already running at ...:6379", either:
+#   RAY_CLEAN_START=1 ./run-...sh   (stops existing Ray on this node; single-user only), or
+#   RAY_PORT=6380 RAY_DASHBOARD_PORT=8266 ./run-...sh   (second Ray head on different ports)
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+export RAY_PORT=${RAY_PORT:-6379}
+export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
+if [ "${RAY_CLEAN_START:-0}" = "1" ]; then
+  ray stop --force || true
+  sleep 2
+fi
+ray start --head --node-ip-address ${MASTER_ADDR} --port "${RAY_PORT}" --num-gpus 8 \
+  --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port="${RAY_DASHBOARD_PORT}"
 
 
-ray job submit --address="http://127.0.0.1:8265" \
+ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
    --runtime-env-json='{
      "env_vars": {
         "PYTHONPATH": "/root/Megatron-LM/",
         "CUDA_DEVICE_MAX_CONNECTIONS": "1"
      }
    }' \
-   -- python3 train.py \
+   -- python3 "${SLIME_ROOT}/train.py" \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 2 \
    --rollout-num-gpus 4 \
-   ${MODEL_ARGS[@]} \
-   ${CKPT_ARGS[@]} \
-   ${ROLLOUT_ARGS[@]} \
-   ${OPTIMIZER_ARGS[@]} \
-   ${GRPO_ARGS[@]} \
-   ${WANDB_ARGS[@]} \
-   ${PERF_ARGS[@]} \
-   ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
-   ${MISC_ARGS[@]} \
-   ${RM_ARGS[@]}
+   "${MODEL_ARGS[@]}" \
+   "${CKPT_ARGS[@]}" \
+   "${ROLLOUT_ARGS[@]}" \
+   "${OPTIMIZER_ARGS[@]}" \
+   "${GRPO_ARGS[@]}" \
+   "${WANDB_ARGS[@]}" \
+   "${PERF_ARGS[@]}" \
+   "${EVAL_ARGS[@]}" \
+   "${SGLANG_ARGS[@]}" \
+   "${MISC_ARGS[@]}" \
+   "${RM_ARGS[@]}"
 
 
 
