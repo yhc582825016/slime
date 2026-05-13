@@ -4,21 +4,27 @@ import ast
 import operator
 import signal
 import contextlib
+import threading
 
 class TimeoutException(Exception):
     pass
 
 @contextlib.contextmanager
 def time_limit(seconds: float):
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
     def signal_handler(signum, frame):
         raise TimeoutException("Timed out!")
 
+    old_handler = signal.signal(signal.SIGALRM, signal_handler)
     signal.setitimer(signal.ITIMER_REAL, seconds)
-    signal.signal(signal.SIGALRM, signal_handler)
     try:
         yield
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 def extract_solution(solution_str):
 

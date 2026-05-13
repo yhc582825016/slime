@@ -15,6 +15,7 @@
 
 import re
 import signal
+import threading
 from typing import Optional
 
 import sympy
@@ -35,10 +36,14 @@ class timeout:
         raise TimeoutError(self.error_message)
 
     def __enter__(self):
+        if threading.current_thread() is not threading.main_thread():
+            return
         signal.signal(signal.SIGALRM, self.handle_timeout)
         signal.alarm(self.seconds)
 
     def __exit__(self, type, value, traceback):
+        if threading.current_thread() is not threading.main_thread():
+            return
         signal.alarm(0)
 
 
@@ -158,6 +163,9 @@ def timeout(timeout_seconds: int = 8):
                 raise TimeoutError("Operation timed out!")
 
             def wrapper(*args, **kwargs):
+                if threading.current_thread() is not threading.main_thread():
+                    return func(*args, **kwargs)
+
                 old_handler = signal.getsignal(signal.SIGALRM)
                 signal.signal(signal.SIGALRM, handler)
                 signal.alarm(timeout_seconds)

@@ -1,0 +1,3 @@
+max_turns: 32
+rollout_interaction_env_path: examples.agenticqwen.env_agenticqwen
+

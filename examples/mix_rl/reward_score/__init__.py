@@ -68,7 +68,12 @@ def default_compute_score(
         from . import cruxeval
         res = cruxeval.compute_score(solution_str, ground_truth)
     # logic
-    elif data_source.startswith("simulation__arcagi") or data_source.startswith("simulation__barc"):
+    elif (
+        data_source.startswith("simulation__arcagi")
+        or data_source.startswith("simulation__barc")
+        or data_source.startswith("logic__arcagi")
+        or data_source.startswith("logic__barc")
+    ):
         from . import arcagi
         res = arcagi.compute_score(solution_str, ground_truth)
     elif data_source.startswith("logic__zebra_puzzle"):
@@ -95,7 +100,7 @@ def default_compute_score(
     elif data_source.startswith('stem__supergpqa'):
         from . import supergpqa
         res = supergpqa.compute_score(solution_str, ground_truth)
-    elif data_source.startswith('stem_web'):
+    elif data_source.startswith('stem_web') or data_source.startswith('stem__web'):
         from . import stem_llm_judge
         res = stem_llm_judge.compute_score(data_source=data_source, model_output=solution_str, ground_truth=ground_truth, extra_info=extra_info)
     elif data_source in ["reasoning_gym", "Nemotron-RL-ReasoningGym-v1", "nvidia/Nemotron-RL-ReasoningGym-v1"]:

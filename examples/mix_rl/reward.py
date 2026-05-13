@@ -103,6 +103,8 @@ def _score_value(result: float | int | bool | dict[str, Any]) -> float | dict[st
             result = dict(result)
             result["score"] = result["acc"]
             return result
+        result = dict(result)
+        result["score"] = 0.0
         return result
     return float(result)
 

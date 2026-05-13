@@ -12,24 +12,43 @@ Convert the parquet data first:
 ```bash
 cd /dev/shm/ye/slime
 python -m examples.mix_rl.convert_guru_to_slime \
-  --input /dev/shm/ye/rl-data/guru-RL-92k/train/math__combined_54.4k.parquet \
-  --output /dev/shm/ye/rl-data/guru-RL-92k-slime/train/math__combined_54.4k.jsonl
+  --input /dev/shm/ye/rl-data/guru-RL-92k/train \
+  --output /dev/shm/ye/rl-data/guru-RL-92k-slime/train/all.jsonl
 ```
 
-You can also pass a directory to convert all nested parquet files.
+When `--input` is a directory and `--output` ends in `.jsonl`, all nested
+parquet files are merged into that one JSONL. If `--output` is a directory, the
+converter writes one JSONL per parquet file instead.
 Use `--limit 10` for a quick smoke-test conversion.
+
+You can select domains by the file prefix before `__`:
+
+```bash
+# Exclude stem__web when no LLM judge is available.
+python -m examples.mix_rl.convert_guru_to_slime \
+  --input /dev/shm/ye/rl-data/guru-RL-92k/train \
+  --output /dev/shm/ye/rl-data/guru-RL-92k-slime/train/no_stem.jsonl \
+  --exclude-domain stem
+
+# Only convert selected domains.
+python -m examples.mix_rl.convert_guru_to_slime \
+  --input /dev/shm/ye/rl-data/guru-RL-92k/train \
+  --output /dev/shm/ye/rl-data/guru-RL-92k-slime/train/math_logic_table.jsonl \
+  --include-domain math,logic,table
+```
 
 ## Train With Slime
 
 Use the converted JSONL with:
 
 ```bash
---prompt-data /dev/shm/ye/rl-data/guru-RL-92k-slime/train/math__combined_54.4k.jsonl
+--prompt-data /dev/shm/ye/rl-data/guru-RL-92k-slime/train/all.jsonl
 --input-key prompt
 --label-key reward_model
 --metadata-key metadata
 --apply-chat-template
 --custom-rm-path examples.mix_rl.reward.reward_func
+--reward-key score
 ```
 
 For code rewards, configure `CODER1_EXEC` as needed. The migrated default is
@@ -49,6 +68,7 @@ same custom reward:
 --label-key answer
 --metadata-key metadata
 --custom-rm-path examples.mix_rl.reward.reward_func
+--reward-key score
 ```
 
 The reward wrapper reads `metadata.source_dataset`, extracts the model answer
