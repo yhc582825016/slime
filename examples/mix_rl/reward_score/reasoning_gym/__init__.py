@@ -19,11 +19,28 @@ def _json_loads_if_needed(value: Any) -> Any:
     return value
 
 
+def _normalize_answer_for_scoring(value: Any) -> str:
+    """Coerce oracle/model answers into strings that reasoning_gym scorers expect."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value).strip()
+
+
 def _extract_answer_from_solution(solution_str: str) -> str:
     """Match resources_servers/reasoning_gym/app.py answer extraction."""
     extracted = extract_answer(solution_str, tag_name="answer")
     if extracted is not None:
-        return extracted
+        return _normalize_answer_for_scoring(extracted)
 
     boxed_match = re.search(r"\\boxed\{([^}]+)\}", solution_str)
     if boxed_match:
@@ -76,6 +93,35 @@ def _entry_from_inputs(ground_truth: Any, extra_info: Any) -> dict[str, Any]:
     return entry
 
 
+def _normalize_entry_for_scoring(entry: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(entry)
+    if "answer" in normalized:
+        normalized["answer"] = _normalize_answer_for_scoring(normalized["answer"])
+    return normalized
+
+
+def _model_answer_variants(model_answer: str) -> list[str]:
+    variants: list[str] = []
+    for candidate in (
+        model_answer,
+        _normalize_answer_for_scoring(model_answer),
+        re.sub(r"\s+", "", _normalize_answer_for_scoring(model_answer)),
+        _normalize_answer_for_scoring(model_answer).replace(",", ""),
+    ):
+        if candidate and candidate not in variants:
+            variants.append(candidate)
+    return variants or [""]
+
+
+def _entry_variants(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    variants: list[dict[str, Any]] = []
+    for candidate in (entry, _normalize_entry_for_scoring(entry)):
+        key = json.dumps(candidate, sort_keys=True, default=str)
+        if key not in {json.dumps(v, sort_keys=True, default=str) for v in variants}:
+            variants.append(candidate)
+    return variants
+
+
 def _task_name(entry: dict[str, Any], extra_info: Any) -> str:
     extra_info = _json_loads_if_needed(extra_info)
     metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
@@ -99,6 +145,39 @@ def _task_name(entry: dict[str, Any], extra_info: Any) -> str:
     raise ValueError("Reasoning Gym reward requires metadata.source_dataset or task in extra_info.")
 
 
+def _score_with_format_retries(
+    score_fn: Any,
+    model_answer: str,
+    entry: dict[str, Any],
+    task_name: str,
+) -> tuple[float, str]:
+    """Try raw and normalized Reasoning Gym inputs; keep the best score."""
+    best_score = 0.0
+    best_answer = _normalize_answer_for_scoring(model_answer)
+    last_error: Exception | None = None
+    had_successful_call = False
+
+    for entry_variant in _entry_variants(entry):
+        for answer_variant in _model_answer_variants(model_answer):
+            try:
+                score = float(score_fn(answer=answer_variant, entry=entry_variant))
+                had_successful_call = True
+            except Exception as exc:
+                last_error = exc
+                continue
+
+            if score > best_score:
+                best_score = score
+                best_answer = answer_variant
+            if best_score >= 1.0:
+                return best_score, best_answer
+
+    if last_error is not None and best_score == 0.0 and not had_successful_call:
+        print(f"Error scoring Reasoning Gym answer for task {task_name}: {last_error}")
+
+    return best_score, best_answer
+
+
 def compute_score(solution_str: str, ground_truth: Any, extra_info: Any = None) -> dict[str, float]:
     """Compute Reasoning Gym score for a slime sample.
 
@@ -111,12 +190,8 @@ def compute_score(solution_str: str, ground_truth: Any, extra_info: Any = None) 
     task_name = _task_name(entry, extra_info)
     model_answer = _extract_answer_from_solution(solution_str)
 
-    try:
-        score_fn = reasoning_gym.get_score_answer_fn(task_name)
-        score = float(score_fn(answer=model_answer, entry=entry))
-    except Exception as exc:
-        print(f"Error scoring Reasoning Gym answer for task {task_name}: {exc}")
-        score = 0.0
+    score_fn = reasoning_gym.get_score_answer_fn(task_name)
+    score, model_answer = _score_with_format_retries(score_fn, model_answer, entry, task_name)
 
     return {
         "score": score,

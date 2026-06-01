@@ -115,6 +115,9 @@ def default_compute_score(
     elif data_source in ["ood__ifbench"]:
         from . import ifbench
         res = ifbench.compute_score(solution_str, ground_truth, extra_info=extra_info)
+    elif data_source in ["ood__ic"]:
+        from . import ic
+        res = ic.compute_score(solution_str, ground_truth, extra_info=extra_info)
     # NOTE: above is added by Reasoning360
     elif data_source == "openai/gsm8k":
         from . import gsm8k

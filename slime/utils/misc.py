@@ -1,9 +1,10 @@
 import importlib
+import os
 import subprocess
 
 import ray
 
-from slime.utils.http_utils import is_port_available
+from slime.utils.http_utils import SLIME_HOST_IP_ENV, is_port_available
 
 
 def load_function(path):
@@ -56,6 +57,10 @@ def exec_command(cmd: str, capture_output: bool = False) -> str | None:
 
 
 def get_current_node_ip():
+    """Ray node IP, or SLIME_HOST_IP when set (must match rollout/train reachability)."""
+    override = os.environ.get(SLIME_HOST_IP_ENV)
+    if override:
+        return override.strip().strip("[]")
     address = ray._private.services.get_node_ip_address()
     # strip ipv6 address
     address = address.strip("[]")

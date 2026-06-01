@@ -19,6 +19,14 @@ from slime.utils.http_utils import get_host_info
 logger = logging.getLogger(__name__)
 
 
+def _sglang_http_timeout() -> tuple[float, float]:
+    """(connect, read) timeouts for SGLang HTTP; weight sync can hold the read side a long time."""
+    return (
+        float(os.environ.get("SLIME_HTTP_CONNECT_TIMEOUT", "180")),
+        float(os.environ.get("SLIME_HTTP_READ_TIMEOUT", "1200")),
+    )
+
+
 def get_base_gpu_id(args, rank):
     num_gpus = min(args.num_gpus_per_node, args.rollout_num_gpus_per_engine)
     if args.colocate:
@@ -233,13 +241,29 @@ class SGLangEngine(RayActor):
             return
 
         url = f"http://{self.server_host}:{self.server_port}/{endpoint}"
-        response = requests.post(url, json=payload or {})
-        try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            e.add_note(f"{response.text=}")
-            raise
-        return response.json()
+        timeout = _sglang_http_timeout()
+        max_retries = max(1, int(os.environ.get("SLIME_HTTP_MAX_RETRIES", "10")))
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, json=payload or {}, timeout=timeout)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.HTTPError as e:
+                e.add_note(f"{response.text=}")
+                raise
+            except (requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError) as e:
+                if attempt == max_retries - 1:
+                    raise
+                wait = min(2.0**attempt, 30.0)
+                logger.warning(
+                    "SGLang HTTP POST %s failed (%s), retry %d/%d in %.1fs",
+                    endpoint,
+                    e,
+                    attempt + 1,
+                    max_retries,
+                    wait,
+                )
+                time.sleep(wait)
 
     def health_generate(self, timeout: float = 5.0) -> bool:
         """Run /health_generate on the underlying SGLang HTTP server.
@@ -295,7 +319,10 @@ class SGLangEngine(RayActor):
         # flush cache will not return status_code 200 when there are pending requests
         for _ in range(60):
             try:
-                response = requests.get(f"http://{self.server_host}:{self.server_port}/flush_cache")
+                response = requests.get(
+                    f"http://{self.server_host}:{self.server_port}/flush_cache",
+                    timeout=_sglang_http_timeout(),
+                )
                 if response.status_code == 200:
                     break
             except NewConnectionError as e:
@@ -424,12 +451,20 @@ class SGLangEngine(RayActor):
         )
 
     def pause_generation(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/pause_generation", json={})
+        response = requests.post(
+            f"http://{self.server_host}:{self.server_port}/pause_generation",
+            json={},
+            timeout=_sglang_http_timeout(),
+        )
         response.raise_for_status()
         return response
 
     def continue_generation(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/continue_generation", json={})
+        response = requests.post(
+            f"http://{self.server_host}:{self.server_port}/continue_generation",
+            json={},
+            timeout=_sglang_http_timeout(),
+        )
         response.raise_for_status()
         return response
 

@@ -58,7 +58,9 @@ def compute_score(solution_str, ground_truth, extra_info=None):
         # Build and check instruction
         instr_cls = INSTRUCTION_DICT[instr_id]
         instr = instr_cls(instr_id)
-        instr.build_description(**clean_args)
+        allowed_keys = set(instr.get_instruction_args_keys())
+        filtered_args = {k: clean_args[k] for k in clean_args if k in allowed_keys}
+        instr.build_description(**filtered_args)
         passed = bool(answer and instr.check_following(answer))
         results.append(passed)
 
