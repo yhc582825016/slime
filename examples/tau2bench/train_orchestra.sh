@@ -3,24 +3,61 @@
 # 基于 slime + GRPO，训练 Qwen3.5-4B 作为 Orchestrator
 #
 # 使用方式：
-#   cd /dev/shm/ye/slime
+#   cd /mnt/code/yehangcheng/slime
 #   bash examples/tau2bench/train_orchestra.sh
 #
 # 前置条件：
-#   1. 检索服务已启动（retrieval_general_thought.py --port 8000）
-#   2. Expert 模型服务已启动（可与训练共用同一批 GPU，训练时暂停 expert 服务）
+#   1. 检索服务已启动（retrieval_general_thought.py --port 8000，qa 数据需要）
+#
+# GPU 分配：
+#   GPU 0-5 — 训练 Qwen3.5-4B（6 卡）
+#   GPU 6,7 — DASHSCOPE SGLang（Qwen3.6-35B-A3B, port 13141）
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+SLIME_DIR="$(cd -- "${SCRIPT_DIR}/../.." &>/dev/null && pwd)"
+
+DASHSCOPE_PORT=13141
+DASHSCOPE_LOG=/mnt/code/yehangcheng/logs/Qwen3.6-35B-A3B
+DASHSCOPE_BASE_URL="http://127.0.0.1:${DASHSCOPE_PORT}/v1"
+TRAIN_GPUS="${TRAIN_GPUS:-0,1,2,3,4,5}"
+ACTOR_NUM_GPUS="${ACTOR_NUM_GPUS:-6}"
+CONTEXT_PARALLEL_SIZE="${CONTEXT_PARALLEL_SIZE:-6}"
+RAY_NUM_GPUS="${RAY_NUM_GPUS:-${ACTOR_NUM_GPUS}}"
+SKIP_PROCESS_KILL=1
+
+# ── 启动 DASHSCOPE SGLang，然后等待就绪 ──────────────────────────────────────
+mkdir -p "$(dirname "${DASHSCOPE_LOG}")"
+if bash -c "echo >/dev/tcp/127.0.0.1/${DASHSCOPE_PORT}" 2>/dev/null; then
+    echo "port ${DASHSCOPE_PORT} 已有服务，跳过启动"
+else
+    NCCL_SOCKET_IFNAME=lo CUDA_VISIBLE_DEVICES=6,7 \
+        nohup python -m sglang.launch_server \
+            --model-path /opt/users/models/Qwen3.6-35B-A3B \
+            --port "${DASHSCOPE_PORT}" \
+            --tp-size 2 \
+            --mem-fraction-static 0.7 \
+            --context-length 262144 \
+            --reasoning-parser qwen3 \
+            --host 0.0.0.0 \
+            --tool-call-parser qwen3_coder \
+            > "${DASHSCOPE_LOG}" 2>&1 &
+fi
+
+echo "等待 DASHSCOPE 服务 (port ${DASHSCOPE_PORT})..."
+for i in $(seq 1 120); do
+    if bash -c "echo >/dev/tcp/127.0.0.1/${DASHSCOPE_PORT}" 2>/dev/null; then
+        echo "DASHSCOPE 已就绪"
+        break
+    fi
+    sleep 5
+done
 
 # 若由 launch.sh 统一管理，则跳过此处的进程清理
-PRESERVE_USER_AGENT="${PRESERVE_USER_AGENT:-1}"
-if [ "${SKIP_PROCESS_KILL:-0}" != "1" ]; then
+if [ "${SKIP_PROCESS_KILL}" != "1" ]; then
     ray stop --force
     pkill -9 ray 2>/dev/null || true
-    if [ "${PRESERVE_USER_AGENT}" != "1" ]; then
-        pkill -9 sglang 2>/dev/null || true
-        pkill -9 python 2>/dev/null || true
-    else
-        echo "Preserving external user-agent processes. Set PRESERVE_USER_AGENT=0 to kill all python/sglang processes."
-    fi
+    pkill -9 -f "sglang.launch_server" 2>/dev/null || true
+    pkill -9 sglang 2>/dev/null || true
     sleep 3
 fi
 
@@ -29,14 +66,11 @@ rm -rf /tmp/tau2_orch_* /tmp/tau2_transfer_* /tmp/tau2_output* 2>/dev/null
 echo "Cleaned up tau2 temp files."
 
 # 清理上一轮 rollout 日志（重新开始记录）
-rm -rf /data/rollout_logs/train /data/rollout_logs/eval 2>/dev/null
+rm -rf /mnt/code/yehangcheng/slime/rollout_logs/train /mnt/code/yehangcheng/slime/rollout_logs/eval 2>/dev/null
 echo "Cleaned up old rollout logs."
 
 ulimit -n 65536
 set -ex
-
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-SLIME_DIR="$(cd -- "${SCRIPT_DIR}/../.." &>/dev/null && pwd)"
 
 # NVLink 检测
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
@@ -49,10 +83,10 @@ source "${SLIME_DIR}/scripts/models/qwen3.5-4B.sh"
 MODEL_ARGS+=(--seq-length 8184)
 
 # ── 路径配置 ─────────────────────────────────────────────────────────────────
-HF_CKPT="${HF_CKPT:-/dev/shm/Qwen3.5-4B}"                       # HuggingFace 格式原始权重
-REF_CKPT="${REF_CKPT:-/dev/shm/Qwen3.5-4B-Thinking_torch_dist}"  # Megatron 分布式格式（ref model）
-SAVE_DIR="${SAVE_DIR:-/data/checkpoints/orchestra_qwen3.5_4b_rl}"
-LOG_DIR="${LOG_DIR:-/dev/shm/ye/logs}"
+HF_CKPT="${HF_CKPT:-/opt/users/models/Qwen3.5-4B}"                       # HuggingFace 格式原始权重
+REF_CKPT="${REF_CKPT:-/opt/users/models/Qwen3.5-4B_torch_dist}"  # Megatron 分布式格式（ref model）
+SAVE_DIR="${SAVE_DIR:-/mnt/code/yehangcheng/slime/checkpoints/orchestra_qwen3.5_4b_rl}"
+LOG_DIR="${LOG_DIR:-/mnt/code/yehangcheng/slime/logs}"
 TRAIN_LOG_DATE="${TRAIN_LOG_DATE:-$(date +%Y%m%d)}"
 TRAIN_JOB_LOG="${TRAIN_JOB_LOG:-${LOG_DIR}/orchestra_train_${TRAIN_LOG_DATE}.log}"
 mkdir -p "${LOG_DIR}"
@@ -82,9 +116,9 @@ case "${DATA_CATEGORY}" in
         ;;
 esac
 
-SHARED_DATA_PATH="/dev/shm/ye/rl-data/data_slime_${DATA_SUFFIX}.jsonl"
+SHARED_DATA_PATH="/mnt/code/yehangcheng/slime/rl-data/data_slime_${DATA_SUFFIX}.jsonl"
 LOCAL_DATA_PATH="${SCRIPT_DIR}/data/data_slime_${DATA_SUFFIX}.jsonl"
-LEGACY_DATA_PATH="/dev/shm/ye/slime-agentic/agentic/ToolOrchestra/data/data_slime_${DATA_SUFFIX}.jsonl"
+LEGACY_DATA_PATH="/mnt/code/yehangcheng/slime/examples/tau2bench/data/data_slime_${DATA_SUFFIX}.jsonl"
 if [ -z "${DATA_PATH:-}" ]; then
     if [ -f "${SHARED_DATA_PATH}" ]; then
         DATA_PATH="${SHARED_DATA_PATH}"
@@ -104,6 +138,8 @@ CKPT_ARGS=(
     --save-interval  50
 )
 
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-126}"
+
 # ── Rollout（数据 + 采样）────────────────────────────────────────────────────
 ROLLOUT_ARGS=(
     --prompt-data    "${DATA_PATH}"
@@ -120,7 +156,7 @@ ROLLOUT_ARGS=(
     --rollout-max-response-len 4096
     --rollout-max-context-len 10384
     --rollout-temperature    0.7
-    --global-batch-size      126
+    --global-batch-size      "${GLOBAL_BATCH_SIZE}"
     --balance-data
 )
 
@@ -138,11 +174,11 @@ EVAL_ARGS=(
 )
 
 # ── 并行 & 性能 ───────────────────────────────────────────────────────────────
-# 4B 模型，6× GPU（GPU 2-7），TP=2（DP=3），降低单卡显存
+# 4B 模型，6× GPU（GPU 0-5），TP=2（DP=3）
 PERF_ARGS=(
     --tensor-model-parallel-size   1
     --pipeline-model-parallel-size 1
-    --context-parallel-size        6
+    --context-parallel-size        "${CONTEXT_PARALLEL_SIZE}"
     --expert-model-parallel-size   1
     --expert-tensor-parallel-size  1
 
@@ -227,7 +263,7 @@ export RAY_DISABLE_EXPORT_METRICS=1
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 ray start --head \
     --node-ip-address "${MASTER_ADDR}" \
-    --num-gpus 6 \
+    --num-gpus "${RAY_NUM_GPUS}" \
     --disable-usage-stats \
     --dashboard-host=0.0.0.0 \
     --dashboard-port=8265
@@ -248,14 +284,14 @@ RUNTIME_ENV_JSON="{
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"PYTORCH_ALLOC_CONF\": \"max_split_size_mb:128\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
-    \"CUDA_VISIBLE_DEVICES\": \"${CUDA_VISIBLE_DEVICES:-2,3,4,5,6,7}\",
+    \"CUDA_VISIBLE_DEVICES\": \"${CUDA_VISIBLE_DEVICES:-${TRAIN_GPUS}}\",
     \"SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN\": \"1\",
     \"OTEL_SDK_DISABLED\": \"true\",
     \"RAY_DISABLE_EXPORT_METRICS\": \"1\",
     \"WANDB_API_KEY\": \"${WANDB_API_KEY:-}\",
     \"WANDB_BASE_URL\": \"${WANDB_BASE_URL}\",
     \"DASHSCOPE_API_KEY\": \"${DASHSCOPE_API_KEY:-dummy}\",
-    \"DASHSCOPE_BASE_URL\": \"${DASHSCOPE_BASE_URL:-http://127.0.0.1:6032/v1}\",
+    \"DASHSCOPE_BASE_URL\": \"${DASHSCOPE_BASE_URL}\",
     \"DASHSCOPE_MODEL\": \"${DASHSCOPE_MODEL:-Qwen3.5-4B}\",
     \"DASHSCOPE_ENABLE_THINKING\": \"${DASHSCOPE_ENABLE_THINKING:-0}\",
     \"ORCHESTRA_MAX_TURNS\": \"${ORCHESTRA_MAX_TURNS}\",
@@ -268,7 +304,7 @@ TRAIN_CMD=(
     --runtime-env-json="${RUNTIME_ENV_JSON}"
     -- python3 "${SLIME_DIR}/train.py"
     --actor-num-nodes         1
-    --actor-num-gpus-per-node 6
+    --actor-num-gpus-per-node "${ACTOR_NUM_GPUS}"
     --colocate
     "${MODEL_ARGS[@]}"
     "${CKPT_ARGS[@]}"
